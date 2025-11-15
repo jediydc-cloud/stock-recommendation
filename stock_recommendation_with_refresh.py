@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-한국 주식 종합 추천 시스템 (GitHub Actions 자동화 버전)
+한국 주식 종합 추천 시스템 (30점 기준 버전)
 - 2,700개 종목 스캔 (코스피 + 코스닥)
 - 종합점수: RSI + 이격도 + 거래량 + PBR
 - 위험도: PBR + 시가총액 + 업종 (참고용)
+- 기준: 30점 이상 (현실적인 기준)
 """
 
 import pandas as pd
@@ -160,14 +161,13 @@ def calculate_comprehensive_score(rsi, disparity, volume_ratio, pbr):
 def calculate_risk_level(pbr, market_cap, sector):
     """
     위험도 계산 (기업 안정성 기반 - 참고용)
-    낮을수록 안정적, 높을수록 위험
     """
     risk = 0
     
-    # 1. PBR 위험도 (저평가 ≠ 안전)
+    # 1. PBR 위험도
     if pd.notna(pbr) and pbr > 0:
         if pbr < 0.3:
-            risk += 30  # 극단적 저평가 = 구조적 문제
+            risk += 30
         elif pbr < 0.5:
             risk += 20
         elif pbr < 0.7:
@@ -179,13 +179,13 @@ def calculate_risk_level(pbr, market_cap, sector):
     
     # 2. 시가총액 위험도
     if pd.notna(market_cap):
-        if market_cap < 500:  # 500억 미만
+        if market_cap < 500:
             risk += 30
-        elif market_cap < 1000:  # 1천억 미만
+        elif market_cap < 1000:
             risk += 20
-        elif market_cap < 5000:  # 5천억 미만
+        elif market_cap < 5000:
             risk += 10
-        elif market_cap < 10000:  # 1조 미만
+        elif market_cap < 10000:
             risk += 5
     else:
         risk += 25
@@ -204,7 +204,6 @@ def calculate_risk_level(pbr, market_cap, sector):
     else:
         risk += 15
     
-    # 위험도 레벨 변환
     if risk >= 60:
         return "매우 높음"
     elif risk >= 45:
@@ -250,10 +249,9 @@ def analyze_all_stocks():
             volume_ratio = calculate_volume_ratio(df['거래량'])
             
             pbr = fundamental['PBR'] if 'PBR' in fundamental.index else np.nan
-            market_cap = fundamental['시가총액'] / 100000000 if '시가총액' in fundamental.index else np.nan  # 억원 단위
+            market_cap = fundamental['시가총액'] / 100000000 if '시가총액' in fundamental.index else np.nan
             per = fundamental['PER'] if 'PER' in fundamental.index else np.nan
             
-            # 업종 정보 (없으면 '기타'로 처리)
             sector = '기타'
             
             # 종합점수 계산
@@ -262,8 +260,8 @@ def analyze_all_stocks():
             # 위험도 계산
             risk = calculate_risk_level(pbr, market_cap, sector)
             
-            # 50점 이상만 저장
-            if score >= 50:
+            # ===== 수정: 30점 이상만 저장 =====
+            if score >= 30:
                 results.append({
                     '종목코드': ticker,
                     '종목명': name,
@@ -289,7 +287,6 @@ def analyze_all_stocks():
 def get_market_indices():
     """코스피/코스닥 지수"""
     try:
-        # 최근 5영업일 중 데이터가 있는 날 찾기
         for i in range(5):
             target_date = (datetime.now() - timedelta(days=i)).strftime('%Y%m%d')
             try:
@@ -309,7 +306,6 @@ def get_market_indices():
             except:
                 continue
         
-        # 데이터 없으면 기본값
         return {
             'kospi': {'value': 0, 'change': 0},
             'kosdaq': {'value': 0, 'change': 0}
@@ -323,7 +319,6 @@ def get_market_indices():
 def generate_html(results_df, output_file='output/index.html'):
     """HTML 페이지 생성"""
     
-    # output 디렉토리 생성
     os.makedirs('output', exist_ok=True)
     
     # 상위 30개 선택
@@ -414,7 +409,6 @@ def generate_html(results_df, output_file='output/index.html'):
             padding-left: 15px;
         }}
         
-        /* TOP 8 카드 그리드 */
         .top8-grid {{
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -452,7 +446,6 @@ def generate_html(results_df, output_file='output/index.html'):
             opacity: 0.9;
         }}
         
-        /* 전체 목록 테이블 */
         table {{
             width: 100%;
             border-collapse: collapse;
@@ -483,7 +476,6 @@ def generate_html(results_df, output_file='output/index.html'):
             font-size: 1.1em;
         }}
         
-        /* 시장 지수 */
         .indices {{
             display: flex;
             justify-content: space-around;
@@ -524,7 +516,6 @@ def generate_html(results_df, output_file='output/index.html'):
             color: #3498db;
         }}
         
-        /* 뉴스 섹션 */
         .news-item {{
             padding: 15px;
             border-left: 3px solid #667eea;
@@ -544,7 +535,6 @@ def generate_html(results_df, output_file='output/index.html'):
             line-height: 1.6;
         }}
         
-        /* 업종 카드 */
         .sector-grid {{
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -571,7 +561,6 @@ def generate_html(results_df, output_file='output/index.html'):
             line-height: 1.5;
         }}
         
-        /* 인사이트 섹션 */
         .insight-box {{
             background: #fff9e6;
             border-left: 4px solid #ffc107;
@@ -600,13 +589,11 @@ def generate_html(results_df, output_file='output/index.html'):
             <button class="refresh-btn" onclick="location.reload()">🔄 새로고침</button>
         </div>
         
-        <!-- 섹션 1: TOP 8 추천 -->
         <div class="section">
             <div class="section-title">🏆 오늘의 TOP 8 추천</div>
             <div class="top8-grid">
 """
     
-    # TOP 8 카드 생성
     for idx, row in top8.iterrows():
         html += f"""
                 <div class="stock-card">
@@ -636,7 +623,6 @@ def generate_html(results_df, output_file='output/index.html'):
                 <tbody>
 """
     
-    # 전체 30개 테이블
     for idx, row in top_results.iterrows():
         html += f"""
                     <tr>
@@ -660,7 +646,6 @@ def generate_html(results_df, output_file='output/index.html'):
             </table>
         </div>
         
-        <!-- 섹션 2: 시장 브리핑 -->
         <div class="section">
             <div class="section-title">📰 시장 브리핑</div>
             
@@ -668,8 +653,8 @@ def generate_html(results_df, output_file='output/index.html'):
                 <div class="news-title">🔥 오늘의 핵심 뉴스</div>
                 <div class="news-summary">
                     • 저평가 반등 종목 {len(top_results)}개 선정 완료<br>
-                    • RSI 30 이하 과매도 구간 종목 집중 추천<br>
-                    • 이격도 90% 이하 저평가 종목 다수 포함
+                    • 종합점수 30점 이상 투자 기회 발굴<br>
+                    • 현실적 기준으로 실전 투자 가능 종목 선별
                 </div>
             </div>
             
@@ -687,7 +672,6 @@ def generate_html(results_df, output_file='output/index.html'):
             </div>
         </div>
         
-        <!-- 섹션 3: 업종별 투자 기회 -->
         <div class="section">
             <div class="section-title">🏢 업종별 투자 기회</div>
             <div class="sector-grid">
@@ -718,7 +702,6 @@ def generate_html(results_df, output_file='output/index.html'):
             </div>
         </div>
         
-        <!-- 섹션 4: 다차원 인사이트 -->
         <div class="section">
             <div class="section-title">💡 다차원 인사이트</div>
             
@@ -728,6 +711,9 @@ def generate_html(results_df, output_file='output/index.html'):
                     종합점수는 <strong>매수 타이밍</strong>을 나타냅니다. 
                     RSI(과매도), 이격도(저평가), 거래량(매집), PBR(가치)을 종합 평가하여 
                     <strong>지금 사면 유리한 종목</strong>을 순위로 보여줍니다.
+                    <br><br>
+                    <strong>※ 30점 기준 적용:</strong> 현재 시장 상황을 반영한 현실적 기준으로, 
+                    실전 투자가 가능한 종목들을 선별합니다.
                 </div>
             </div>
             
@@ -743,9 +729,9 @@ def generate_html(results_df, output_file='output/index.html'):
             <div class="insight-box">
                 <div class="insight-title">🎯 추천 투자 전략</div>
                 <div class="insight-text">
-                    1. <strong>단기 투자</strong>: 종합점수 70점 이상 + 위험도 높음 → 빠른 반등 노리기<br>
-                    2. <strong>중기 투자</strong>: 종합점수 60점 이상 + 위험도 중간 → 안정적 상승<br>
-                    3. <strong>장기 투자</strong>: 종합점수 50점 이상 + 위험도 낮음 → 가치 투자
+                    1. <strong>적극적 투자</strong>: 종합점수 40점 이상 + 위험도 높음 → 빠른 반등 노리기<br>
+                    2. <strong>균형 투자</strong>: 종합점수 35점 이상 + 위험도 중간 → 안정적 상승<br>
+                    3. <strong>안정 투자</strong>: 종합점수 30점 이상 + 위험도 낮음 → 가치 투자
                 </div>
             </div>
         </div>
