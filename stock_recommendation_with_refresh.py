@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 print("🔧 필요한 라이브러리 확인 중...")
 
 try:
-    import FinanceDataReader as fdr
+    
     from pykrx import stock
     print("✅ 라이브러리 로드 완료")
 except ImportError:
