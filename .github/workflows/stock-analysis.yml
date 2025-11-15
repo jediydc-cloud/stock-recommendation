@@ -22,9 +22,10 @@ jobs:
         
     - name: 필요한 패키지 설치
       run: |
+        pip install --upgrade pip
         pip install pandas numpy requests
-        pip install FinanceDataReader pykrx
-        pip install matplotlib seaborn
+        pip install finance-datareader pykrx
+        pip install matplotlib seaborn pillow
         
     - name: 주식 분석 실행
       env:
