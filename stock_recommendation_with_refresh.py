@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-한국 주식 종합 추천 시스템 (30점 기준 버전)
+한국 주식 종합 추천 시스템 (최종 수정 버전)
 - 2,700개 종목 스캔 (코스피 + 코스닥)
 - 종합점수: RSI + 이격도 + 거래량 + PBR
 - 위험도: PBR + 시가총액 + 업종 (참고용)
-- 기준: 30점 이상 (현실적인 기준)
+- 기준: 30점 이상
+- 종목 0개여도 페이지 생성 (논리적 메시지)
 """
 
 import pandas as pd
@@ -260,7 +261,7 @@ def analyze_all_stocks():
             # 위험도 계산
             risk = calculate_risk_level(pbr, market_cap, sector)
             
-            # ===== 수정: 30점 이상만 저장 =====
+            # 30점 이상만 저장
             if score >= 30:
                 results.append({
                     '종목코드': ticker,
@@ -317,21 +318,23 @@ def get_market_indices():
         }
 
 def generate_html(results_df, output_file='output/index.html'):
-    """HTML 페이지 생성"""
+    """HTML 페이지 생성 (종목 0개여도 생성)"""
     
     os.makedirs('output', exist_ok=True)
-    
-    # 상위 30개 선택
-    top_results = results_df.head(30)
-    
-    # TOP 8 카드용 데이터
-    top8 = top_results.head(8)
     
     # 시장 지수
     indices = get_market_indices()
     
     # 현재 시간
     update_time = datetime.now().strftime('%Y년 %m월 %d일 %H:%M')
+    
+    # 종목 있는지 확인
+    has_stocks = not results_df.empty
+    
+    if has_stocks:
+        # 상위 30개 선택
+        top_results = results_df.head(30)
+        top8 = top_results.head(8)
     
     html = f"""
 <!DOCTYPE html>
@@ -407,6 +410,28 @@ def generate_html(results_df, output_file='output/index.html'):
             margin-bottom: 20px;
             border-left: 5px solid #667eea;
             padding-left: 15px;
+        }}
+        
+        .no-stocks-message {{
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            border-radius: 10px;
+            padding: 30px;
+            text-align: center;
+            margin: 20px 0;
+        }}
+        
+        .no-stocks-message h3 {{
+            color: #856404;
+            font-size: 1.5em;
+            margin-bottom: 15px;
+        }}
+        
+        .no-stocks-message p {{
+            color: #856404;
+            font-size: 1.1em;
+            line-height: 1.8;
+            margin: 10px 0;
         }}
         
         .top8-grid {{
@@ -590,20 +615,24 @@ def generate_html(results_df, output_file='output/index.html'):
         </div>
         
         <div class="section">
-            <div class="section-title">🏆 오늘의 TOP 8 추천</div>
-            <div class="top8-grid">
+            <div class="section-title">🏆 오늘의 TOP 추천</div>
 """
     
-    for idx, row in top8.iterrows():
-        html += f"""
+    if has_stocks:
+        # 종목이 있을 때: TOP 8 + 테이블
+        html += """
+            <div class="top8-grid">
+"""
+        for idx, row in top8.iterrows():
+            html += f"""
                 <div class="stock-card">
                     <div class="name">{row['종목명']}</div>
                     <div class="score">{row['종합점수']}점</div>
                     <div class="risk">위험도: {row['위험도']}</div>
                 </div>
 """
-    
-    html += """
+        
+        html += """
             </div>
             
             <table>
@@ -622,9 +651,9 @@ def generate_html(results_df, output_file='output/index.html'):
                 </thead>
                 <tbody>
 """
-    
-    for idx, row in top_results.iterrows():
-        html += f"""
+        
+        for idx, row in top_results.iterrows():
+            html += f"""
                     <tr>
                         <td class="rank">{idx + 1}</td>
                         <td><strong>{row['종목명']}</strong></td>
@@ -637,13 +666,30 @@ def generate_html(results_df, output_file='output/index.html'):
                         <td>{row['위험도']}</td>
                     </tr>
 """
+        
+        html += """
+                </tbody>
+            </table>
+"""
+    else:
+        # 종목이 없을 때: 논리적 안내 메시지
+        html += """
+            <div class="no-stocks-message">
+                <h3>⚠️ 현재 투자 조건에 맞는 종목이 없습니다</h3>
+                <p><strong>현재 상황:</strong> 저평가 매수 기회가 부족합니다.</p>
+                <p><strong>원인:</strong> 과매도(RSI<30), 저평가(이격도<90%), 거래량 급증(>150%)을 동시에 만족하는 종목이 없습니다.</p>
+                <p><strong>해석:</strong> 시장이 안정적이거나 관망세입니다.</p>
+                <p style="margin-top: 20px;"><strong>권장 사항:</strong> 내일 다시 확인하거나, 시장 변동성이 커질 때를 기다리세요.</p>
+                <p style="margin-top: 10px; font-size: 0.95em;">💡 <strong>Tip:</strong> 조정장이 오면 저평가 종목이 많아집니다!</p>
+            </div>
+"""
     
     kospi_class = 'positive' if indices['kospi']['change'] >= 0 else 'negative'
     kosdaq_class = 'positive' if indices['kosdaq']['change'] >= 0 else 'negative'
     
+    stock_count = len(results_df) if has_stocks else 0
+    
     html += f"""
-                </tbody>
-            </table>
         </div>
         
         <div class="section">
@@ -652,9 +698,22 @@ def generate_html(results_df, output_file='output/index.html'):
             <div class="news-item">
                 <div class="news-title">🔥 오늘의 핵심 뉴스</div>
                 <div class="news-summary">
-                    • 저평가 반등 종목 {len(top_results)}개 선정 완료<br>
+"""
+    
+    if has_stocks:
+        html += f"""
+                    • 저평가 반등 종목 {stock_count}개 선정 완료<br>
                     • 종합점수 30점 이상 투자 기회 발굴<br>
                     • 현실적 기준으로 실전 투자 가능 종목 선별
+"""
+    else:
+        html += """
+                    • 현재 저평가 매수 기회 부족, 시장 안정 국면<br>
+                    • 조정장 진입 시 투자 기회 포착 예정<br>
+                    • 시장 지수와 업종 분석 지속 모니터링 중
+"""
+    
+    html += f"""
                 </div>
             </div>
             
@@ -731,7 +790,9 @@ def generate_html(results_df, output_file='output/index.html'):
                 <div class="insight-text">
                     1. <strong>적극적 투자</strong>: 종합점수 40점 이상 + 위험도 높음 → 빠른 반등 노리기<br>
                     2. <strong>균형 투자</strong>: 종합점수 35점 이상 + 위험도 중간 → 안정적 상승<br>
-                    3. <strong>안정 투자</strong>: 종합점수 30점 이상 + 위험도 낮음 → 가치 투자
+                    3. <strong>안정 투자</strong>: 종합점수 30점 이상 + 위험도 낮음 → 가치 투자<br>
+                    <br>
+                    <strong>※ 종목이 없을 때:</strong> 무리한 투자보다는 좋은 기회를 기다리는 것이 현명합니다.
                 </div>
             </div>
         </div>
@@ -756,14 +817,15 @@ def main():
     # 전체 종목 분석
     results_df = analyze_all_stocks()
     
+    # 종목 0개여도 HTML 생성
     if results_df.empty:
-        print("❌ 조건에 맞는 종목이 없습니다.")
-        return
+        print("⚠️ 조건에 맞는 종목이 없습니다.")
+        print("📄 기본 페이지를 생성합니다...")
+    else:
+        # 종합점수 기준 정렬
+        results_df = results_df.sort_values('종합점수', ascending=False).reset_index(drop=True)
     
-    # 종합점수 기준 정렬
-    results_df = results_df.sort_values('종합점수', ascending=False).reset_index(drop=True)
-    
-    # HTML 생성
+    # 항상 HTML 생성
     generate_html(results_df, output_file='output/index.html')
     
     print("=" * 50)
