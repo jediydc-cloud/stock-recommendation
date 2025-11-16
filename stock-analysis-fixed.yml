@@ -1,0 +1,39 @@
+name: 주식 분석 자동 실행
+
+on:
+  schedule:
+    # 평일 오전 8시 (한국시간 기준, UTC 23:00 = 한국시간 08:00)
+    - cron: '0 23 * * 1-5'  # 월~금요일만 실행
+  
+  workflow_dispatch:  # 수동 실행 버튼 (새로고침 기능)
+
+jobs:
+  analyze-stocks:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 코드 체크아웃
+      uses: actions/checkout@v3
+      
+    - name: Python 설치
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: 필요한 패키지 설치
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: 주식 분석 실행
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        python stock_recommendation_with_refresh.py
+        
+    - name: 분석 결과 업로드
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./output
+        publish_branch: gh-pages
