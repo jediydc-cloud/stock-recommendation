@@ -1,0 +1,4 @@
+pykrx
+pandas
+numpy
+requests
