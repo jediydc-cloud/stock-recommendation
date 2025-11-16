@@ -29,7 +29,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        python stock_recommendation_with_refresh.py
+        python stock_recommendation_with_exchange.py
         
     - name: 분석 결과 업로드
       uses: peaceiris/actions-gh-pages@v3
