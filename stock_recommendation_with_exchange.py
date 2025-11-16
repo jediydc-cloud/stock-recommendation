@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-한국 주식 저평가 종목 추천 시스템 (완전판)
-- 2,700개 전체 종목 스캔
-- 종합 Top 30 + 카테고리별 Top 5
-- 한국은행 환율 정보 연동
-- 코스피/코스닥 지수 안정적 수집 (20영업일 확인)
-- 위험도 및 모든 기존 정보 유지
+한국 주식 저평가 종목 추천 시스템 (긴급 수정판)
+- 주말/공휴일 대응
+- 환율 에러 수정
+- 종목 데이터 수집 개선
 """
 
 import pandas as pd
@@ -37,9 +35,19 @@ def get_business_days_ago(days_ago):
     count = 0
     while count < days_ago:
         current -= timedelta(days=1)
-        # 주말 제외 (월요일=0, 일요일=6)
         if current.weekday() < 5:  
             count += 1
+    
+    return current.strftime("%Y%m%d")
+
+def get_last_trading_date():
+    """가장 최근 영업일 반환"""
+    korea_tz = pytz.timezone('Asia/Seoul')
+    current = datetime.now(korea_tz)
+    
+    # 토요일(5) 또는 일요일(6)이면 금요일로
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
     
     return current.strftime("%Y%m%d")
 
@@ -47,12 +55,7 @@ def get_business_days_ago(days_ago):
 # 2. 시장 지수 수집 (개선 버전)
 # ===========================================
 def get_market_indices():
-    """
-    코스피/코스닥 지수 안정적 수집
-    - 한국시간 기준 날짜 계산
-    - 20영업일까지 확장 확인
-    - 데이터 없을 시 참고값 사용
-    """
+    """코스피/코스닥 지수 안정적 수집"""
     print("\n" + "="*60)
     print("📊 시장 지수 수집 시작")
     print("="*60)
@@ -74,12 +77,10 @@ def get_market_indices():
             
             print(f"\n🔍 시도 {days_back}/20: {target_date} 데이터 확인 중...")
             
-            # 코스피 수집
             kospi_df = stock.get_index_ohlcv(target_date, target_date, "1001")
             if not kospi_df.empty and len(kospi_df) > 0:
                 indices['kospi']['value'] = float(kospi_df['종가'].iloc[-1])
                 
-                # 전일 대비 변동률 계산
                 prev_kospi_df = stock.get_index_ohlcv(prev_date, prev_date, "1001")
                 if not prev_kospi_df.empty:
                     prev_close = float(prev_kospi_df['종가'].iloc[-1])
@@ -88,12 +89,10 @@ def get_market_indices():
                 
                 print(f"✅ 코스피: {indices['kospi']['value']:,.2f} ({indices['kospi']['change']:+.2f}%)")
             
-            # 코스닥 수집
             kosdaq_df = stock.get_index_ohlcv(target_date, target_date, "2001")
             if not kosdaq_df.empty and len(kosdaq_df) > 0:
                 indices['kosdaq']['value'] = float(kosdaq_df['종가'].iloc[-1])
                 
-                # 전일 대비 변동률 계산
                 prev_kosdaq_df = stock.get_index_ohlcv(prev_date, prev_date, "2001")
                 if not prev_kosdaq_df.empty:
                     prev_close = float(prev_kosdaq_df['종가'].iloc[-1])
@@ -102,7 +101,6 @@ def get_market_indices():
                 
                 print(f"✅ 코스닥: {indices['kosdaq']['value']:,.2f} ({indices['kosdaq']['change']:+.2f}%)")
             
-            # 둘 다 수집 성공 시 종료
             if indices['kospi']['value'] > 0 and indices['kosdaq']['value'] > 0:
                 print(f"\n✨ 지수 데이터 수집 성공! (기준일: {target_date})")
                 return indices, target_date
@@ -111,10 +109,9 @@ def get_market_indices():
             print(f"⚠️ {target_date} 데이터 수집 실패: {str(e)}")
             continue
     
-    # 20영업일 동안 데이터 없을 시 참고값 사용
     print("\n" + "="*60)
     print("⚠️ 경고: 20영업일 동안 지수 데이터를 찾을 수 없음")
-    print("📌 참고값으로 대체합니다 (실제 시장 상황과 다를 수 있음)")
+    print("📌 참고값으로 대체합니다")
     print("="*60)
     
     indices['kospi'] = {'value': 2500.0, 'change': 0.0, 'is_reference': True}
@@ -123,14 +120,10 @@ def get_market_indices():
     return indices, None
 
 # ===========================================
-# 3. 환율 정보 수집 (한국은행 API)
+# 3. 환율 정보 수집 (에러 수정)
 # ===========================================
 def get_exchange_rates():
-    """
-    한국은행 Open API를 통한 환율 정보 수집
-    - USD/KRW, JPY(100)/KRW, EUR/KRW
-    - 최대 10영업일 전까지 확인
-    """
+    """한국은행 Open API를 통한 환율 정보 수집"""
     print("\n" + "="*60)
     print("💱 환율 정보 수집 시작")
     print("="*60)
@@ -138,15 +131,14 @@ def get_exchange_rates():
     API_KEY = "GVEYC4C6R9ZM5JFAQ2FY"
     rates = {'USD': None, 'JPY': None, 'EUR': None, 'date': None}
     
-    # 환율 코드 (한국은행 API)
     currency_codes = {
-        'USD': '0000001',  # 미국 달러
-        'JPY': '0000002',  # 일본 엔 (100엔 기준)
-        'EUR': '0000003'   # 유럽 유로
+        'USD': '0000001',
+        'JPY': '0000002',
+        'EUR': '0000003'
     }
     
-    # 최대 10영업일 전까지 확인
-    for days_back in range(1, 11):
+    # 30영업일로 확장
+    for days_back in range(1, 31):
         try:
             target_date = get_business_days_ago(days_back)
             print(f"\n🔍 환율 데이터 확인 중: {target_date}")
@@ -169,44 +161,37 @@ def get_exchange_rates():
                         print(f"✅ {currency}: {rate:,.2f}원")
                 
                 except Exception as e:
-                    print(f"⚠️ {currency} 수집 실패: {str(e)}")
                     continue
             
-            # 3개 모두 수집 성공 시 종료
             if success_count == 3:
                 print(f"\n✨ 환율 데이터 수집 성공! (기준일: {target_date})")
                 return rates
         
         except Exception as e:
-            print(f"⚠️ {target_date} 환율 수집 실패: {str(e)}")
             continue
     
-    print("\n⚠️ 환율 정보를 가져올 수 없습니다")
+    print("\n⚠️ 30영업일 동안 환율 데이터를 찾을 수 없음")
+    print("📌 환율 정보는 'N/A'로 표시됩니다")
     return rates
 
 # ===========================================
-# 4. 종목별 기술적 지표 계산
+# 4. 종목별 기술적 지표 계산 (수정)
 # ===========================================
-def calculate_technical_indicators(ticker, ticker_name):
+def calculate_technical_indicators(ticker, ticker_name, end_date):
     """
     개별 종목의 기술적 지표 계산
-    - RSI, 이격도, 거래량, PBR
-    - 종합점수 계산
-    - 위험도 평가
+    end_date: 최근 영업일 (주말 제외)
     """
     try:
-        # 60일 데이터 수집
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+        start_date = (datetime.strptime(end_date, "%Y%m%d") - timedelta(days=90)).strftime("%Y%m%d")
         df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
         
         if df.empty or len(df) < 20:
             return None
         
-        # 현재가
         current_price = df['종가'].iloc[-1]
         
-        # ===== RSI (14일) =====
+        # RSI
         delta = df['종가'].diff()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
@@ -214,25 +199,24 @@ def calculate_technical_indicators(ticker, ticker_name):
         rsi = 100 - (100 / (1 + rs))
         current_rsi = rsi.iloc[-1]
         
-        # ===== 이격도 (20일 이동평균 대비) =====
+        # 이격도
         ma20 = df['종가'].rolling(window=20).mean().iloc[-1]
         disparity = (current_price / ma20) * 100
         
-        # ===== 거래량 비율 (20일 평균 대비) =====
+        # 거래량 비율
         avg_volume = df['거래량'].rolling(window=20).mean().iloc[-1]
         current_volume = df['거래량'].iloc[-1]
         volume_ratio = (current_volume / avg_volume) * 100
         
-        # ===== PBR (저평가 지표) =====
+        # PBR
         fundamental = stock.get_market_fundamental(end_date, end_date, ticker)
         if fundamental.empty:
             return None
         pbr = fundamental['PBR'].iloc[0]
         
-        # ===== 종합점수 계산 =====
+        # 종합점수
         score = 0
         
-        # RSI 점수 (30점 만점) - 과매도 구간 선호
         if current_rsi <= 30:
             score += 30
         elif current_rsi <= 40:
@@ -240,7 +224,6 @@ def calculate_technical_indicators(ticker, ticker_name):
         elif current_rsi <= 50:
             score += 10
         
-        # 이격도 점수 (25점 만점) - 저평가 구간 선호
         if disparity <= 95:
             score += 25
         elif disparity <= 98:
@@ -248,7 +231,6 @@ def calculate_technical_indicators(ticker, ticker_name):
         elif disparity <= 100:
             score += 5
         
-        # 거래량 점수 (25점 만점) - 거래량 증가 선호
         if volume_ratio >= 150:
             score += 25
         elif volume_ratio >= 120:
@@ -256,7 +238,6 @@ def calculate_technical_indicators(ticker, ticker_name):
         elif volume_ratio >= 100:
             score += 5
         
-        # PBR 점수 (20점 만점) - 저PBR 선호
         if 0 < pbr <= 0.8:
             score += 20
         elif pbr <= 1.0:
@@ -264,17 +245,14 @@ def calculate_technical_indicators(ticker, ticker_name):
         elif pbr <= 1.5:
             score += 10
         
-        # ===== 위험도 계산 (참고용) =====
+        # 위험도
         risk_factors = []
-        
-        # PBR 기반 위험도
         if pbr < 0.5:
             risk_factors.append("극저PBR")
         
-        # 시가총액 확인
         market_cap = stock.get_market_cap(end_date, end_date, ticker)
         if not market_cap.empty:
-            cap_value = market_cap['시가총액'].iloc[0] / 100000000  # 억원 단위
+            cap_value = market_cap['시가총액'].iloc[0] / 100000000
             if cap_value < 1000:
                 risk_factors.append("소형주")
         
@@ -301,19 +279,18 @@ def calculate_technical_indicators(ticker, ticker_name):
         return None
 
 # ===========================================
-# 5. 전체 시장 스캔
+# 5. 전체 시장 스캔 (수정)
 # ===========================================
 def scan_all_stocks():
-    """
-    코스피 + 코스닥 전체 종목 스캔
-    - 약 2,700개 종목
-    - 모든 종목 점수 계산 (필터링 없음)
-    """
+    """코스피 + 코스닥 전체 종목 스캔"""
     print("\n" + "="*60)
     print("🔍 전체 시장 스캔 시작")
     print("="*60)
     
-    # 코스피 + 코스닥 티커 수집
+    # 최근 영업일 가져오기
+    end_date = get_last_trading_date()
+    print(f"📅 데이터 기준일: {end_date}")
+    
     kospi_tickers = stock.get_market_ticker_list(market="KOSPI")
     kosdaq_tickers = stock.get_market_ticker_list(market="KOSDAQ")
     all_tickers = kospi_tickers + kosdaq_tickers
@@ -328,15 +305,13 @@ def scan_all_stocks():
     for ticker in all_tickers:
         processed += 1
         
-        # 진행률 표시 (매 100개)
         if processed % 100 == 0:
             print(f"⏳ 진행률: {processed}/{total_count} ({processed/total_count*100:.1f}%)")
         
         try:
             ticker_name = stock.get_market_ticker_name(ticker)
-            result = calculate_technical_indicators(ticker, ticker_name)
+            result = calculate_technical_indicators(ticker, ticker_name, end_date)
             
-            # 모든 종목 수집 (필터링 없음)
             if result:
                 results.append(result)
         
@@ -356,20 +331,16 @@ def scan_all_stocks():
 # 6. 추천 종목 선별
 # ===========================================
 def select_recommendations(df):
-    """
-    Top 30 + 카테고리별 Top 5 선별
-    """
+    """Top 30 + 카테고리별 Top 5 선별"""
     recommendations = {}
     
     if len(df) == 0:
         return recommendations
     
-    # ===== 종합 Top 30 =====
     top_30 = df.head(30).copy()
     top_30.index = range(1, len(top_30) + 1)
     recommendations['top_30'] = top_30
     
-    # 평균 점수 계산
     avg_score = top_30['종합점수'].mean()
     if avg_score >= 60:
         market_status = "🟢 강한 저평가 신호"
@@ -381,16 +352,12 @@ def select_recommendations(df):
     recommendations['market_status'] = f"{market_status} (평균: {avg_score:.1f}점)"
     recommendations['avg_score'] = avg_score
     
-    # ===== 카테고리별 Top 5 =====
-    # 🔴 과매도 (RSI 낮은 순)
     recommendations['rsi_top5'] = df.nsmallest(5, 'RSI')[['종목명', '현재가', 'RSI', '종합점수', '위험도']].reset_index(drop=True)
     recommendations['rsi_top5'].index = range(1, len(recommendations['rsi_top5']) + 1)
     
-    # 💰 저평가 (이격도 낮은 순)
     recommendations['disparity_top5'] = df.nsmallest(5, '이격도')[['종목명', '현재가', '이격도', '종합점수', '위험도']].reset_index(drop=True)
     recommendations['disparity_top5'].index = range(1, len(recommendations['disparity_top5']) + 1)
     
-    # 📈 거래량 급증 (거래량비율 높은 순)
     recommendations['volume_top5'] = df.nlargest(5, '거래량비율')[['종목명', '현재가', '거래량비율', '종합점수', '위험도']].reset_index(drop=True)
     recommendations['volume_top5'].index = range(1, len(recommendations['volume_top5']) + 1)
     
@@ -406,30 +373,30 @@ def select_recommendations(df):
     return recommendations
 
 # ===========================================
-# 7. HTML 리포트 생성
+# 7. HTML 리포트 생성 (환율 에러 수정)
 # ===========================================
 def generate_html_report(recommendations, indices, index_date, exchange_rates):
-    """
-    GitHub Pages용 HTML 리포트 생성
-    - 6개 섹션 구조
-    - 반응형 디자인
-    - 모든 기존 정보 유지
-    """
+    """GitHub Pages용 HTML 리포트 생성"""
     korea_tz = pytz.timezone('Asia/Seoul')
     current_time = datetime.now(korea_tz)
     update_time = current_time.strftime("%Y년 %m월 %d일 %H:%M")
     
-    # 참고값 여부 확인
     kospi_ref_mark = " *" if indices['kospi']['is_reference'] else ""
     kosdaq_ref_mark = " *" if indices['kosdaq']['is_reference'] else ""
     
-    # 지수 기준일 표시
     index_date_display = index_date if index_date else "참고값"
     
-    # 환율 날짜 표시
-    exchange_date_display = exchange_rates.get('date', 'N/A')
-    if exchange_date_display != 'N/A':
+    # ⭐ 환율 날짜 에러 수정
+    exchange_date_display = exchange_rates.get('date')
+    if exchange_date_display and exchange_date_display != 'N/A':
         exchange_date_display = f"{exchange_date_display[:4]}.{exchange_date_display[4:6]}.{exchange_date_display[6:]}"
+    else:
+        exchange_date_display = 'N/A'
+    
+    # ⭐ 환율 값 안전하게 가져오기
+    usd_display = f"{exchange_rates.get('USD'):,.2f}" if exchange_rates.get('USD') else 'N/A'
+    jpy_display = f"{exchange_rates.get('JPY'):,.2f}" if exchange_rates.get('JPY') else 'N/A'
+    eur_display = f"{exchange_rates.get('EUR'):,.2f}" if exchange_rates.get('EUR') else 'N/A'
     
     html = f"""
 <!DOCTYPE html>
@@ -786,7 +753,6 @@ def generate_html_report(recommendations, indices, index_date, exchange_rates):
                 </div>
 """
     
-    # 참고값 사용 시 경고 메시지
     if indices['kospi']['is_reference'] or indices['kosdaq']['is_reference']:
         html += """
                 <div class="reference-note">
@@ -805,15 +771,15 @@ def generate_html_report(recommendations, indices, index_date, exchange_rates):
                 <div class="info-grid">
                     <div class="info-card">
                         <h3>미국 달러 (USD)</h3>
-                        <div class="value">{exchange_rates.get('USD', 'N/A') if exchange_rates.get('USD') else 'N/A'}원</div>
+                        <div class="value">{usd_display}원</div>
                     </div>
                     <div class="info-card">
                         <h3>일본 엔 (100JPY)</h3>
-                        <div class="value">{exchange_rates.get('JPY', 'N/A') if exchange_rates.get('JPY') else 'N/A'}원</div>
+                        <div class="value">{jpy_display}원</div>
                     </div>
                     <div class="info-card">
                         <h3>유럽 유로 (EUR)</h3>
-                        <div class="value">{exchange_rates.get('EUR', 'N/A') if exchange_rates.get('EUR') else 'N/A'}원</div>
+                        <div class="value">{eur_display}원</div>
                     </div>
                     <div class="info-card">
                         <h3>환율 기준일</h3>
@@ -893,7 +859,6 @@ def generate_html_report(recommendations, indices, index_date, exchange_rates):
 """
         
         for idx, row in top_30.iterrows():
-            # 점수에 따른 스타일
             if row['종합점수'] >= 60:
                 score_class = 'score-high'
             elif row['종합점수'] >= 40:
@@ -901,7 +866,6 @@ def generate_html_report(recommendations, indices, index_date, exchange_rates):
             else:
                 score_class = 'score-low'
             
-            # 위험도 스타일
             if row['위험도'] == '낮음':
                 risk_class = 'risk-low'
             elif row['위험도'] == '중간':
@@ -1085,7 +1049,7 @@ def generate_html_report(recommendations, indices, index_date, exchange_rates):
 def main():
     """메인 실행 함수"""
     print("\n" + "="*60)
-    print("🚀 한국 주식 저평가 종목 추천 시스템 시작 (완전판)")
+    print("🚀 한국 주식 저평가 종목 추천 시스템 시작 (긴급 수정판)")
     print("="*60)
     
     # 1. 시장 지수 수집
