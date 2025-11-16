@@ -5,6 +5,7 @@
 - ExchangeRate-API 사용 (안정적)
 - 토요일/주말 대응
 - 종합 Top 30 + 카테고리별 Top 5
+- HTML 자동 생성
 """
 
 import pandas as pd
@@ -356,7 +357,555 @@ def select_recommendations(df):
     return recommendations
 
 # ===========================================
-# 7. 메인 실행
+# 7. HTML 생성
+# ===========================================
+def generate_html(recommendations, indices, exchange_rates, data_date):
+    """HTML 파일 생성"""
+    print("\n" + "="*60)
+    print("📄 HTML 파일 생성 중...")
+    print("="*60)
+    
+    os.makedirs('output', exist_ok=True)
+    
+    korea_tz = pytz.timezone('Asia/Seoul')
+    current_time = datetime.now(korea_tz).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 환율 정보 HTML
+    exchange_html = ""
+    if exchange_rates.get('USD'):
+        exchange_html = f"""
+        <div class="exchange-info">
+            <h3>💱 환율 정보</h3>
+            <div class="exchange-grid">
+                <div class="exchange-item">
+                    <span class="currency">🇺🇸 USD</span>
+                    <span class="rate">{exchange_rates['USD']:,.2f}원</span>
+                </div>
+                <div class="exchange-item">
+                    <span class="currency">🇯🇵 JPY (100엔)</span>
+                    <span class="rate">{exchange_rates['JPY']:,.2f}원</span>
+                </div>
+                <div class="exchange-item">
+                    <span class="currency">🇪🇺 EUR</span>
+                    <span class="rate">{exchange_rates['EUR']:,.2f}원</span>
+                </div>
+            </div>
+            <p class="update-time">업데이트: {exchange_rates.get('date', 'N/A')}</p>
+        </div>
+        """
+    
+    # Top 30 테이블
+    top30_rows = ""
+    if recommendations and 'top_30' in recommendations:
+        for idx, row in recommendations['top_30'].iterrows():
+            risk_class = {
+                '낮음': 'risk-low',
+                '중간': 'risk-medium',
+                '높음': 'risk-high'
+            }.get(row['위험도'], 'risk-low')
+            
+            top30_rows += f"""
+            <tr>
+                <td>{idx}</td>
+                <td><strong>{row['종목명']}</strong></td>
+                <td>{row['현재가']:,}원</td>
+                <td>{row['RSI']:.1f}</td>
+                <td>{row['이격도']:.1f}%</td>
+                <td>{row['거래량비율']:.1f}%</td>
+                <td>{row['PBR']:.2f}</td>
+                <td><strong>{row['종합점수']}점</strong></td>
+                <td><span class="{risk_class}">{row['위험도']}</span></td>
+                <td class="risk-factors">{row['위험요인']}</td>
+            </tr>
+            """
+    
+    # 카테고리별 Top 5
+    category_html = ""
+    if recommendations:
+        # 과매도 Top 5
+        rsi_rows = ""
+        for idx, row in recommendations['rsi_top5'].iterrows():
+            risk_class = {
+                '낮음': 'risk-low',
+                '중간': 'risk-medium',
+                '높음': 'risk-high'
+            }.get(row['위험도'], 'risk-low')
+            rsi_rows += f"""
+            <tr>
+                <td>{idx}</td>
+                <td><strong>{row['종목명']}</strong></td>
+                <td>{row['현재가']:,}원</td>
+                <td><strong>{row['RSI']:.1f}</strong></td>
+                <td>{row['종합점수']}점</td>
+                <td><span class="{risk_class}">{row['위험도']}</span></td>
+            </tr>
+            """
+        
+        # 저평가 Top 5
+        disparity_rows = ""
+        for idx, row in recommendations['disparity_top5'].iterrows():
+            risk_class = {
+                '낮음': 'risk-low',
+                '중간': 'risk-medium',
+                '높음': 'risk-high'
+            }.get(row['위험도'], 'risk-low')
+            disparity_rows += f"""
+            <tr>
+                <td>{idx}</td>
+                <td><strong>{row['종목명']}</strong></td>
+                <td>{row['현재가']:,}원</td>
+                <td><strong>{row['이격도']:.1f}%</strong></td>
+                <td>{row['종합점수']}점</td>
+                <td><span class="{risk_class}">{row['위험도']}</span></td>
+            </tr>
+            """
+        
+        # 거래량 Top 5
+        volume_rows = ""
+        for idx, row in recommendations['volume_top5'].iterrows():
+            risk_class = {
+                '낮음': 'risk-low',
+                '중간': 'risk-medium',
+                '높음': 'risk-high'
+            }.get(row['위험도'], 'risk-low')
+            volume_rows += f"""
+            <tr>
+                <td>{idx}</td>
+                <td><strong>{row['종목명']}</strong></td>
+                <td>{row['현재가']:,}원</td>
+                <td><strong>{row['거래량비율']:.1f}%</strong></td>
+                <td>{row['종합점수']}점</td>
+                <td><span class="{risk_class}">{row['위험도']}</span></td>
+            </tr>
+            """
+        
+        category_html = f"""
+        <div class="category-section">
+            <h2>📊 카테고리별 추천</h2>
+            
+            <div class="category-grid">
+                <div class="category-box">
+                    <h3>🔴 과매도 Top 5</h3>
+                    <p class="category-desc">RSI 기준 가장 낮은 종목 (반등 가능성)</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>순위</th>
+                                <th>종목명</th>
+                                <th>현재가</th>
+                                <th>RSI</th>
+                                <th>점수</th>
+                                <th>위험도</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rsi_rows}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="category-box">
+                    <h3>💰 저평가 Top 5</h3>
+                    <p class="category-desc">이격도 기준 가장 낮은 종목 (저평가)</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>순위</th>
+                                <th>종목명</th>
+                                <th>현재가</th>
+                                <th>이격도</th>
+                                <th>점수</th>
+                                <th>위험도</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {disparity_rows}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="category-box">
+                    <h3>📈 거래량 급증 Top 5</h3>
+                    <p class="category-desc">거래량 증가율 가장 높은 종목</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>순위</th>
+                                <th>종목명</th>
+                                <th>현재가</th>
+                                <th>거래량비율</th>
+                                <th>점수</th>
+                                <th>위험도</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {volume_rows}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        """
+    
+    # 전체 HTML
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>한국 주식 저평가 종목 추천</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }}
+        
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }}
+        
+        header {{
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+        }}
+        
+        h1 {{
+            font-size: 2.5em;
+            color: #2d3748;
+            margin-bottom: 10px;
+        }}
+        
+        .update-info {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 20px 0;
+            padding: 15px;
+            background: #f7fafc;
+            border-radius: 10px;
+        }}
+        
+        .market-indices {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }}
+        
+        .index-card {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }}
+        
+        .index-name {{
+            font-size: 0.9em;
+            opacity: 0.9;
+            margin-bottom: 5px;
+        }}
+        
+        .index-value {{
+            font-size: 1.8em;
+            font-weight: bold;
+            margin: 5px 0;
+        }}
+        
+        .index-change {{
+            font-size: 1.1em;
+        }}
+        
+        .positive {{ color: #48bb78; }}
+        .negative {{ color: #f56565; }}
+        
+        .exchange-info {{
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }}
+        
+        .exchange-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }}
+        
+        .exchange-item {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            border: 2px solid #e2e8f0;
+        }}
+        
+        .currency {{
+            font-weight: 600;
+            color: #2d3748;
+        }}
+        
+        .rate {{
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #667eea;
+        }}
+        
+        .market-status {{
+            text-align: center;
+            padding: 20px;
+            background: #edf2f7;
+            border-radius: 10px;
+            margin: 20px 0;
+            font-size: 1.3em;
+            font-weight: bold;
+        }}
+        
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        
+        thead {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }}
+        
+        th, td {{
+            padding: 15px;
+            text-align: center;
+            border-bottom: 1px solid #e2e8f0;
+        }}
+        
+        th {{
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+            letter-spacing: 0.5px;
+        }}
+        
+        tbody tr:hover {{
+            background: #f7fafc;
+            transition: background 0.3s;
+        }}
+        
+        .risk-low {{
+            background: #c6f6d5;
+            color: #22543d;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: 600;
+        }}
+        
+        .risk-medium {{
+            background: #feebc8;
+            color: #7c2d12;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: 600;
+        }}
+        
+        .risk-high {{
+            background: #fed7d7;
+            color: #742a2a;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: 600;
+        }}
+        
+        .risk-factors {{
+            font-size: 0.85em;
+            color: #718096;
+        }}
+        
+        .category-section {{
+            margin-top: 40px;
+        }}
+        
+        .category-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }}
+        
+        .category-box {{
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #e2e8f0;
+        }}
+        
+        .category-box h3 {{
+            color: #2d3748;
+            margin-bottom: 10px;
+        }}
+        
+        .category-desc {{
+            color: #718096;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+        }}
+        
+        .refresh-btn {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            font-size: 1em;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }}
+        
+        .refresh-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }}
+        
+        .update-time {{
+            color: #718096;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }}
+        
+        footer {{
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 2px solid #e2e8f0;
+            color: #718096;
+        }}
+        
+        @media (max-width: 768px) {{
+            .container {{
+                padding: 15px;
+            }}
+            
+            h1 {{
+                font-size: 1.8em;
+            }}
+            
+            table {{
+                font-size: 0.85em;
+            }}
+            
+            th, td {{
+                padding: 10px 5px;
+            }}
+            
+            .category-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 한국 주식 저평가 종목 추천</h1>
+            <p style="color: #718096; margin-top: 10px;">기술적 분석 기반 자동 종목 선별 시스템</p>
+        </header>
+        
+        <div class="update-info">
+            <div>
+                <strong>마지막 업데이트:</strong> {current_time}
+                <br>
+                <strong>데이터 기준일:</strong> {data_date if data_date else 'N/A'}
+            </div>
+            <button class="refresh-btn" onclick="location.reload()">🔄 새로고침</button>
+        </div>
+        
+        <div class="market-indices">
+            <div class="index-card">
+                <div class="index-name">KOSPI</div>
+                <div class="index-value">{indices['kospi']['value']:,.2f}</div>
+                <div class="index-change {'positive' if indices['kospi']['change'] >= 0 else 'negative'}">
+                    {indices['kospi']['change']:+.2f}%
+                </div>
+            </div>
+            <div class="index-card">
+                <div class="index-name">KOSDAQ</div>
+                <div class="index-value">{indices['kosdaq']['value']:,.2f}</div>
+                <div class="index-change {'positive' if indices['kosdaq']['change'] >= 0 else 'negative'}">
+                    {indices['kosdaq']['change']:+.2f}%
+                </div>
+            </div>
+        </div>
+        
+        {exchange_html}
+        
+        <div class="market-status">
+            {recommendations.get('market_status', '데이터 없음')}
+        </div>
+        
+        <h2 style="margin-top: 40px; color: #2d3748;">🏆 종합 추천 Top 30</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>순위</th>
+                    <th>종목명</th>
+                    <th>현재가</th>
+                    <th>RSI</th>
+                    <th>이격도</th>
+                    <th>거래량비율</th>
+                    <th>PBR</th>
+                    <th>종합점수</th>
+                    <th>위험도</th>
+                    <th>위험요인</th>
+                </tr>
+            </thead>
+            <tbody>
+                {top30_rows}
+            </tbody>
+        </table>
+        
+        {category_html}
+        
+        <footer>
+            <p><strong>⚠️ 투자 유의사항</strong></p>
+            <p style="margin-top: 10px;">본 정보는 투자 참고용이며, 투자 판단과 결과에 대한 책임은 투자자 본인에게 있습니다.</p>
+            <p style="margin-top: 5px;">위험도가 "높음"인 종목은 변동성이 크므로 신중한 접근이 필요합니다.</p>
+        </footer>
+    </div>
+</body>
+</html>
+    """
+    
+    # 파일 저장
+    with open('output/index.html', 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print("✅ HTML 파일 생성 완료: output/index.html")
+    print(f"📁 파일 크기: {len(html_content):,} bytes")
+
+# ===========================================
+# 8. 메인 실행
 # ===========================================
 def main():
     """메인 실행 함수"""
@@ -376,7 +925,20 @@ def main():
     # 4. 추천 종목 선별
     recommendations = select_recommendations(df)
     
-    # 5. 결과 요약
+    # 5. HTML 생성
+    if recommendations:
+        generate_html(recommendations, indices, exchange_rates, index_date)
+    else:
+        # 종목 0개일 때도 페이지 생성
+        print("\n⚠️ 추천 종목이 없습니다. 기본 페이지를 생성합니다.")
+        empty_recommendations = {
+            'top_30': pd.DataFrame(),
+            'market_status': '🔴 추천 가능한 종목이 없습니다',
+            'avg_score': 0
+        }
+        generate_html(empty_recommendations, indices, exchange_rates, index_date)
+    
+    # 6. 결과 요약
     print("\n" + "="*60)
     print("📊 실행 결과 요약")
     print("="*60)
@@ -398,17 +960,12 @@ def main():
             print(f"\n🔴 과매도 #1: {recommendations['rsi_top5'].iloc[0]['종목명']} (RSI: {recommendations['rsi_top5'].iloc[0]['RSI']})")
             print(f"💰 저평가 #1: {recommendations['disparity_top5'].iloc[0]['종목명']} (이격도: {recommendations['disparity_top5'].iloc[0]['이격도']}%)")
             print(f"📈 거래량 #1: {recommendations['volume_top5'].iloc[0]['종목명']} (거래량: {recommendations['volume_top5'].iloc[0]['거래량비율']}%)")
-        
-        return recommendations
     
-    return None
+    print("\n" + "="*60)
+    print("✨ 모든 작업 완료!")
+    print("="*60)
+    
+    return recommendations
 
 if __name__ == "__main__":
     results = main()
-    
-    # Colab에서 DataFrame 표시
-    if results:
-        print("\n" + "="*60)
-        print("✨ 종합 추천 Top 30")
-        print("="*60)
-        display(results['top_30'])
