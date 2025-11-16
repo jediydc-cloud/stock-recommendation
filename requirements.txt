@@ -1,4 +1,0 @@
-pykrx
-pandas
-numpy
-requests
