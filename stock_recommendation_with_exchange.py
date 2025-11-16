@@ -174,6 +174,8 @@ def calculate_technical_indicators(ticker, ticker_name, end_date):
             return None
         
         current_price = df['종가'].iloc[-1]
+        prev_price = df['종가'].iloc[-2] if len(df) >= 2 else current_price
+        price_change = ((current_price - prev_price) / prev_price) * 100
         
         # RSI
         delta = df['종가'].diff()
@@ -246,17 +248,28 @@ def calculate_technical_indicators(ticker, ticker_name, end_date):
         elif len(risk_factors) == 1:
             risk_level = "중간"
         
+        # 업종 정보 수집
+        sector = '기타'
+        try:
+            sector_df = stock.get_market_fundamental(end_date, end_date, ticker)
+            if not sector_df.empty and '업종' in sector_df.columns:
+                sector = sector_df['업종'].iloc[0]
+        except:
+            pass
+        
         return {
             '종목코드': ticker,
             '종목명': ticker_name,
             '현재가': int(current_price),
+            '전일대비': round(price_change, 2),
             'RSI': round(current_rsi, 2),
             '이격도': round(disparity, 2),
             '거래량비율': round(volume_ratio, 2),
             'PBR': round(pbr, 2),
             '종합점수': score,
             '위험도': risk_level,
-            '위험요인': ', '.join(risk_factors) if risk_factors else '-'
+            '위험요인': ', '.join(risk_factors) if risk_factors else '-',
+            '업종': sector
         }
     
     except Exception as e:
@@ -345,6 +358,41 @@ def select_recommendations(df):
     recommendations['volume_top5'] = df.nlargest(5, '거래량비율')[['종목명', '현재가', '거래량비율', '종합점수', '위험도']].reset_index(drop=True)
     recommendations['volume_top5'].index = range(1, 6)
     
+    # 업종별 분석
+    if '업종' in df.columns:
+        sector_groups = df.groupby('업종').agg({
+            '종목명': 'count',
+            '종합점수': 'mean'
+        }).sort_values('종합점수', ascending=False)
+        
+        sector_top3 = {}
+        for sector in sector_groups.head(5).index:
+            if sector != '기타':
+                sector_stocks = df[df['업종'] == sector].head(3)
+                sector_top3[sector] = sector_stocks[['종목명', '현재가', '종합점수', '위험도']].reset_index(drop=True)
+        
+        recommendations['sector_top3'] = sector_top3
+        recommendations['sector_summary'] = sector_groups.head(5)
+    
+    # 카테고리별 인사이트
+    recommendations['rsi_insight'] = {
+        'avg': df['RSI'].head(30).mean(),
+        'min': df['RSI'].head(30).min(),
+        'count_oversold': len(df[df['RSI'] <= 30])
+    }
+    
+    recommendations['disparity_insight'] = {
+        'avg': df['이격도'].head(30).mean(),
+        'min': df['이격도'].head(30).min(),
+        'count_undervalued': len(df[df['이격도'] <= 95])
+    }
+    
+    recommendations['volume_insight'] = {
+        'avg': df['거래량비율'].head(30).mean(),
+        'max': df['거래량비율'].head(30).max(),
+        'count_surge': len(df[df['거래량비율'] >= 150])
+    }
+    
     print("\n" + "="*60)
     print("📊 추천 종목 선별 완료")
     print("="*60)
@@ -352,6 +400,8 @@ def select_recommendations(df):
     print(f"✅ 과매도 Top 5: 5개")
     print(f"✅ 저평가 Top 5: 5개")
     print(f"✅ 거래량 Top 5: 5개")
+    if 'sector_top3' in recommendations:
+        print(f"✅ 업종별 분석: {len(recommendations['sector_top3'])}개 업종")
     print(f"📈 시장 상황: {recommendations['market_status']}")
     
     return recommendations
@@ -404,11 +454,14 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
                 '높음': 'risk-high'
             }.get(row['위험도'], 'risk-low')
             
+            change_class = 'positive' if row['전일대비'] >= 0 else 'negative'
+            
             top30_rows += f"""
             <tr>
                 <td>{idx}</td>
                 <td><strong>{row['종목명']}</strong></td>
                 <td>{row['현재가']:,}원</td>
+                <td class="{change_class}">{row['전일대비']:+.2f}%</td>
                 <td>{row['RSI']:.1f}</td>
                 <td>{row['이격도']:.1f}%</td>
                 <td>{row['거래량비율']:.1f}%</td>
@@ -479,6 +532,38 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
             </tr>
             """
         
+        # 인사이트 HTML
+        rsi_insight = recommendations.get('rsi_insight', {})
+        disparity_insight = recommendations.get('disparity_insight', {})
+        volume_insight = recommendations.get('volume_insight', {})
+        
+        rsi_insight_html = f"""
+        <div class="insight-box">
+            <p><strong>📈 Top 30 평균 RSI:</strong> {rsi_insight.get('avg', 0):.1f}</p>
+            <p><strong>🔻 최저 RSI:</strong> {rsi_insight.get('min', 0):.1f} (극단적 과매도)</p>
+            <p><strong>📊 과매도 종목수:</strong> {rsi_insight.get('count_oversold', 0)}개 (RSI ≤30)</p>
+            <p class="insight-text">→ {"RSI가 30 이하로 극단적 과매도 구간. 단기 반등 가능성 높음" if rsi_insight.get('avg', 0) < 30 else "RSI 평균적. 안정적 진입 가능"}</p>
+        </div>
+        """ if rsi_insight else ""
+        
+        disparity_insight_html = f"""
+        <div class="insight-box">
+            <p><strong>📈 Top 30 평균 이격도:</strong> {disparity_insight.get('avg', 0):.1f}%</p>
+            <p><strong>🔻 최저 이격도:</strong> {disparity_insight.get('min', 0):.1f}%</p>
+            <p><strong>📊 저평가 종목수:</strong> {disparity_insight.get('count_undervalued', 0)}개 (≤95%)</p>
+            <p class="insight-text">→ {"평균 대비 5% 이상 저평가. 가치 투자 기회" if disparity_insight.get('avg', 0) < 95 else "평균 근처. 적정 가격대"}</p>
+        </div>
+        """ if disparity_insight else ""
+        
+        volume_insight_html = f"""
+        <div class="insight-box">
+            <p><strong>📈 Top 30 평균 거래량:</strong> {volume_insight.get('avg', 0):.1f}%</p>
+            <p><strong>🚀 최고 거래량:</strong> {volume_insight.get('max', 0):.1f}%</p>
+            <p><strong>📊 급증 종목수:</strong> {volume_insight.get('count_surge', 0)}개 (≥150%)</p>
+            <p class="insight-text">→ {"거래량 폭발. 시장 관심 급증" if volume_insight.get('avg', 0) > 150 else "적정 거래량. 안정적 수급"}</p>
+        </div>
+        """ if volume_insight else ""
+        
         category_html = f"""
         <div class="category-section">
             <h2>📊 카테고리별 추천</h2>
@@ -487,6 +572,7 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
                 <div class="category-box">
                     <h3>🔴 과매도 Top 5</h3>
                     <p class="category-desc">RSI 기준 가장 낮은 종목 (반등 가능성)</p>
+                    {rsi_insight_html}
                     <table>
                         <thead>
                             <tr>
@@ -507,6 +593,7 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
                 <div class="category-box">
                     <h3>💰 저평가 Top 5</h3>
                     <p class="category-desc">이격도 기준 가장 낮은 종목 (저평가)</p>
+                    {disparity_insight_html}
                     <table>
                         <thead>
                             <tr>
@@ -527,6 +614,7 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
                 <div class="category-box">
                     <h3>📈 거래량 급증 Top 5</h3>
                     <p class="category-desc">거래량 증가율 가장 높은 종목</p>
+                    {volume_insight_html}
                     <table>
                         <thead>
                             <tr>
@@ -543,6 +631,101 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
                         </tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+        """
+    
+    # 지표 가이드 HTML
+    guide_html = """
+    <div class="guide-section">
+        <h2>📚 지표 해석 가이드</h2>
+        <div class="guide-grid">
+            <div class="guide-box">
+                <h3>🔵 RSI (Relative Strength Index)</h3>
+                <p class="guide-desc">상대강도지수 - 과매도/과매수 판단</p>
+                <ul class="guide-list">
+                    <li><strong>30 이하:</strong> 과매도 구간 → 반등 가능성 높음</li>
+                    <li><strong>30-70:</strong> 중립 구간 → 안정적 흘름</li>
+                    <li><strong>70 이상:</strong> 과매수 구간 → 조정 가능성</li>
+                </ul>
+            </div>
+            <div class="guide-box">
+                <h3>📊 이격도 (Disparity)</h3>
+                <p class="guide-desc">현재가 대비 이동평균선 비율</p>
+                <ul class="guide-list">
+                    <li><strong>95% 이하:</strong> 평균 대비 저평가 → 매수 기회</li>
+                    <li><strong>95-105%:</strong> 적정 범위 → 평균 근처</li>
+                    <li><strong>105% 이상:</strong> 고평가 구간 → 조정 주의</li>
+                </ul>
+            </div>
+            <div class="guide-box">
+                <h3>📈 거래량비율</h3>
+                <p class="guide-desc">20일 평균 대비 거래량 증가율</p>
+                <ul class="guide-list">
+                    <li><strong>150% 이상:</strong> 거래량 폭발 → 관심 집중</li>
+                    <li><strong>100-150%:</strong> 적정 거래량 → 안정적</li>
+                    <li><strong>100% 미만:</strong> 저조한 거래 → 관심 부족</li>
+                </ul>
+            </div>
+            <div class="guide-box">
+                <h3>💰 PBR (Price to Book Ratio)</h3>
+                <p class="guide-desc">주가순자산비율 - 가치 평가</p>
+                <ul class="guide-list">
+                    <li><strong>0.8 이하:</strong> 저평가 → 가치 투자 기회</li>
+                    <li><strong>0.8-1.5:</strong> 적정 범위 → 평균적</li>
+                    <li><strong>1.5 이상:</strong> 고평가 → 성장주 가능</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    """
+    
+    # 업종별 분석 HTML
+    sector_html = ""
+    if 'sector_top3' in recommendations and recommendations['sector_top3']:
+        sector_boxes = ""
+        for sector, stocks in list(recommendations['sector_top3'].items())[:3]:
+            stock_rows = ""
+            for idx, row in stocks.iterrows():
+                risk_class = {
+                    '낮음': 'risk-low',
+                    '중간': 'risk-medium',
+                    '높음': 'risk-high'
+                }.get(row['위험도'], 'risk-low')
+                stock_rows += f"""
+                <tr>
+                    <td><strong>{row['종목명']}</strong></td>
+                    <td>{row['현재가']:,}원</td>
+                    <td>{row['종합점수']}점</td>
+                    <td><span class="{risk_class}">{row['위험도']}</span></td>
+                </tr>
+                """
+            
+            sector_boxes += f"""
+            <div class="sector-box">
+                <h3>🏭 {sector}</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>종목명</th>
+                            <th>현재가</th>
+                            <th>점수</th>
+                            <th>위험도</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {stock_rows}
+                    </tbody>
+                </table>
+            </div>
+            """
+        
+        sector_html = f"""
+        <div class="sector-section">
+            <h2>🏭 업종별 분석 (Top 3 업종)</h2>
+            <p class="section-desc">점수가 높은 업종의 주요 종목들을 보여줍니다.</p>
+            <div class="sector-grid">
+                {sector_boxes}
             </div>
         </div>
         """
@@ -742,6 +925,115 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
             color: #718096;
         }}
         
+        .positive {{
+            color: #e53e3e;
+            font-weight: 600;
+        }}
+        
+        .negative {{
+            color: #3182ce;
+            font-weight: 600;
+        }}
+        
+        .guide-section {{
+            margin-top: 40px;
+            background: #f7fafc;
+            padding: 30px;
+            border-radius: 15px;
+        }}
+        
+        .guide-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }}
+        
+        .guide-box {{
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #e2e8f0;
+        }}
+        
+        .guide-box h3 {{
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }}
+        
+        .guide-desc {{
+            color: #718096;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+            font-style: italic;
+        }}
+        
+        .guide-list {{
+            list-style: none;
+            padding: 0;
+        }}
+        
+        .guide-list li {{
+            padding: 8px 0;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 0.9em;
+        }}
+        
+        .guide-list li:last-child {{
+            border-bottom: none;
+        }}
+        
+        .insight-box {{
+            background: #edf2f7;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 0.9em;
+        }}
+        
+        .insight-box p {{
+            margin: 5px 0;
+            color: #2d3748;
+        }}
+        
+        .insight-text {{
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 2px solid #cbd5e0;
+            font-weight: 600;
+            color: #667eea;
+        }}
+        
+        .sector-section {{
+            margin-top: 40px;
+        }}
+        
+        .sector-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }}
+        
+        .sector-box {{
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #e2e8f0;
+        }}
+        
+        .sector-box h3 {{
+            color: #2d3748;
+            margin-bottom: 15px;
+        }}
+        
+        .section-desc {{
+            color: #718096;
+            font-size: 0.95em;
+            margin-top: 10px;
+        }}
+        
         .category-section {{
             margin-top: 40px;
         }}
@@ -864,6 +1156,8 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
             {recommendations.get('market_status', '데이터 없음')}
         </div>
         
+        {guide_html}
+        
         <h2 style="margin-top: 40px; color: #2d3748;">🏆 종합 추천 Top 30</h2>
         <table>
             <thead>
@@ -871,6 +1165,7 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
                     <th>순위</th>
                     <th>종목명</th>
                     <th>현재가</th>
+                    <th>전일대비</th>
                     <th>RSI</th>
                     <th>이격도</th>
                     <th>거래량비율</th>
@@ -886,6 +1181,8 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
         </table>
         
         {category_html}
+        
+        {sector_html}
         
         <footer>
             <p><strong>⚠️ 투자 유의사항</strong></p>
