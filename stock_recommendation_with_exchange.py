@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-한국 주식 저평가 종목 추천 시스템 (최종 완성판)
-- ExchangeRate-API 사용 (안정적)
-- 토요일/주말 대응
-- 종합 Top 30 + 카테고리별 Top 5
-- HTML 자동 생성
+한국 주식 저평가 종목 추천 시스템 (GitHub Actions 최적화 버전)
+- 타임아웃 설정 강화
+- 에러 핸들링 개선
+- 진행 상황 로깅 강화
 """
 
 import pandas as pd
@@ -16,6 +15,7 @@ import pytz
 import warnings
 import os
 import requests
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -162,12 +162,20 @@ def get_exchange_rates():
         return rates
 
 # ===========================================
-# 4. 종목별 기술적 지표 계산
+# 4. 종목별 기술적 지표 계산 (타임아웃 강화)
 # ===========================================
-def calculate_technical_indicators(ticker, ticker_name, end_date):
-    """개별 종목의 기술적 지표 계산"""
+def calculate_technical_indicators(ticker, ticker_name, end_date, timeout=5):
+    """개별 종목의 기술적 지표 계산 (타임아웃 설정)"""
     try:
+        start_time = time.time()
+        
         start_date = (datetime.strptime(end_date, "%Y%m%d") - timedelta(days=90)).strftime("%Y%m%d")
+        
+        # 타임아웃 체크
+        if time.time() - start_time > timeout:
+            print(f"⚠️ {ticker_name} 타임아웃 (OHLCV)")
+            return None
+        
         df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker)
         
         if df.empty or len(df) < 20:
@@ -193,6 +201,11 @@ def calculate_technical_indicators(ticker, ticker_name, end_date):
         avg_volume = df['거래량'].rolling(window=20).mean().iloc[-1]
         current_volume = df['거래량'].iloc[-1]
         volume_ratio = (current_volume / avg_volume) * 100
+        
+        # 타임아웃 체크
+        if time.time() - start_time > timeout:
+            print(f"⚠️ {ticker_name} 타임아웃 (Fundamental)")
+            return None
         
         # PBR
         fundamental = stock.get_market_fundamental(end_date, end_date, ticker)
@@ -276,7 +289,7 @@ def calculate_technical_indicators(ticker, ticker_name, end_date):
         return None
 
 # ===========================================
-# 5. 전체 시장 스캔
+# 5. 전체 시장 스캔 (진행 상황 로깅 강화)
 # ===========================================
 def scan_all_stocks():
     """코스피 + 코스닥 전체 종목 스캔"""
@@ -298,24 +311,41 @@ def scan_all_stocks():
     
     results = []
     processed = 0
+    failed = 0
+    start_time = time.time()
     
     for ticker in all_tickers:
         processed += 1
         
-        if processed % 100 == 0:
+        # 진행 상황 로깅 (50개마다)
+        if processed % 50 == 0:
+            elapsed = time.time() - start_time
+            avg_time = elapsed / processed
+            remaining = (total_count - processed) * avg_time
+            
             print(f"⏳ 진행률: {processed}/{total_count} ({processed/total_count*100:.1f}%)")
+            print(f"   성공: {len(results)}개, 실패: {failed}개")
+            print(f"   경과시간: {elapsed/60:.1f}분, 남은시간: {remaining/60:.1f}분")
         
         try:
             ticker_name = stock.get_market_ticker_name(ticker)
-            result = calculate_technical_indicators(ticker, ticker_name, end_date)
+            result = calculate_technical_indicators(ticker, ticker_name, end_date, timeout=5)
             
             if result:
                 results.append(result)
+            else:
+                failed += 1
         
         except Exception as e:
+            failed += 1
+            if processed % 100 == 0:
+                print(f"⚠️ {ticker} 에러: {str(e)[:50]}")
             continue
     
-    print(f"\n✅ 스캔 완료: {len(results)}개 종목 데이터 수집됨")
+    total_time = time.time() - start_time
+    print(f"\n✅ 스캔 완료: {len(results)}개 종목 수집 성공")
+    print(f"⚠️ 실패: {failed}개 종목")
+    print(f"⏱️ 총 소요시간: {total_time/60:.1f}분")
     
     if results:
         df = pd.DataFrame(results)
@@ -1207,8 +1237,10 @@ def generate_html(recommendations, indices, exchange_rates, data_date):
 def main():
     """메인 실행 함수"""
     print("\n" + "="*60)
-    print("🚀 한국 주식 저평가 종목 추천 시스템 시작 (최종판)")
+    print("🚀 한국 주식 저평가 종목 추천 시스템 시작 (GitHub Actions 최적화)")
     print("="*60)
+    
+    start_time = time.time()
     
     # 1. 시장 지수 수집
     indices, index_date = get_market_indices()
@@ -1235,10 +1267,13 @@ def main():
         }
         generate_html(empty_recommendations, indices, exchange_rates, index_date)
     
+    total_time = time.time() - start_time
+    
     # 6. 결과 요약
     print("\n" + "="*60)
     print("📊 실행 결과 요약")
     print("="*60)
+    print(f"⏱️ 총 실행시간: {total_time/60:.1f}분")
     print(f"코스피: {indices['kospi']['value']:,.2f} ({indices['kospi']['change']:+.2f}%)")
     print(f"코스닥: {indices['kosdaq']['value']:,.2f} ({indices['kosdaq']['change']:+.2f}%)")
     
