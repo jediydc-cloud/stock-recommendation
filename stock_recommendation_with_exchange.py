@@ -261,12 +261,16 @@ def calculate_technical_indicators(ticker, ticker_name, end_date, timeout=5):
         elif len(risk_factors) == 1:
             risk_level = "중간"
         
-        # 업종 정보 수집
+        # 업종 정보 수집 (개선)
         sector = '기타'
         try:
             sector_df = stock.get_market_fundamental(end_date, end_date, ticker)
-            if not sector_df.empty and '업종' in sector_df.columns:
-                sector = sector_df['업종'].iloc[0]
+            if not sector_df.empty:
+                if '업종' in sector_df.columns:
+                    sector_value = sector_df['업종'].iloc[0]
+                    # 빈 값, '-', null 처리 강화
+                    if sector_value and str(sector_value).strip() and sector_value != '-':
+                        sector = str(sector_value).strip()
         except:
             pass
         
@@ -388,7 +392,7 @@ def select_recommendations(df):
     recommendations['volume_top5'] = df.nlargest(5, '거래량비율')[['종목명', '현재가', '거래량비율', '종합점수', '위험도']].reset_index(drop=True)
     recommendations['volume_top5'].index = range(1, 6)
     
-    # 업종별 분석
+    # 업종별 분석 (개선)
     if '업종' in df.columns:
         sector_groups = df.groupby('업종').agg({
             '종목명': 'count',
@@ -396,13 +400,25 @@ def select_recommendations(df):
         }).sort_values('종합점수', ascending=False)
         
         sector_top3 = {}
-        for sector in sector_groups.head(5).index:
-            if sector != '기타':
+        added_count = 0
+        
+        # 최대 10개 업종까지 확인하되, 3개 업종 확보되면 중단
+        for sector in sector_groups.head(10).index:
+            # '기타'는 다른 업종이 없을 때만 포함
+            if sector != '기타' or added_count == 0:
                 sector_stocks = df[df['업종'] == sector].head(3)
-                sector_top3[sector] = sector_stocks[['종목명', '현재가', '종합점수', '위험도']].reset_index(drop=True)
+                if len(sector_stocks) > 0:
+                    sector_top3[sector] = sector_stocks[['종목명', '현재가', '종합점수', '위험도']].reset_index(drop=True)
+                    added_count += 1
+                    print(f"  📊 업종 추가: {sector} ({len(sector_stocks)}개 종목)")
+            
+            # 3개 업종 확보되면 중단
+            if added_count >= 3:
+                break
         
         recommendations['sector_top3'] = sector_top3
         recommendations['sector_summary'] = sector_groups.head(5)
+        print(f"  ✅ 총 {len(sector_top3)}개 업종 분석 완료")
     
     # 카테고리별 인사이트
     recommendations['rsi_insight'] = {
