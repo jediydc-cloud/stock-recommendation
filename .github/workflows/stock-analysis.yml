@@ -10,6 +10,7 @@ on:
 jobs:
   analyze-stocks:
     runs-on: ubuntu-latest
+    timeout-minutes: 60  # 🆕 전체 작업 타임아웃: 60분
     
     steps:
     - name: 코드 체크아웃
@@ -26,14 +27,39 @@ jobs:
         pip install -r requirements.txt
         
     - name: 주식 분석 실행
+      id: analyze  # 🆕 step ID 추가 (에러 핸들링용)
+      timeout-minutes: 50  # 🆕 분석 단계 타임아웃: 50분
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         python stock_recommendation_with_exchange.py
+      continue-on-error: false  # 🆕 에러 발생 시 다음 단계 중단
+        
+    - name: 로그 파일 저장 (에러 발생 시)
+      if: failure()  # 🆕 실패 시에만 실행
+      uses: actions/upload-artifact@v3
+      with:
+        name: error-logs
+        path: |
+          *.log
+          output/
+        retention-days: 7  # 7일간 보관
         
     - name: 분석 결과 업로드
+      if: success()  # 🆕 성공 시에만 배포
       uses: peaceiris/actions-gh-pages@v3
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./output
         publish_branch: gh-pages
+        
+    - name: 분석 완료 알림
+      if: always()  # 🆕 항상 실행 (성공/실패 여부와 관계없이)
+      run: |
+        if [ "${{ steps.analyze.outcome }}" == "success" ]; then
+          echo "✅ 주식 분석 성공!"
+          echo "📊 웹페이지: https://jediydc-cloud.github.io/stock-recommendation/"
+        else
+          echo "❌ 주식 분석 실패!"
+          echo "🔍 로그를 확인하세요."
+        fi
