@@ -10,7 +10,7 @@ on:
 jobs:
   analyze-stocks:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 전체 작업 타임아웃: 60분
+    timeout-minutes: 120  # 🆕 60분 → 120분 (2배 여유)
     
     steps:
     - name: 코드 체크아웃
@@ -28,7 +28,7 @@ jobs:
         
     - name: 주식 분석 실행
       id: analyze
-      timeout-minutes: 50  # 분석 단계 타임아웃: 50분
+      timeout-minutes: 100  # 🆕 50분 → 100분 (2배 여유)
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -37,7 +37,7 @@ jobs:
         
     - name: 로그 파일 저장 (에러 발생 시)
       if: failure()
-      uses: actions/upload-artifact@v4  # 🆕 v3 → v4 업그레이드
+      uses: actions/upload-artifact@v4
       with:
         name: error-logs
         path: |
