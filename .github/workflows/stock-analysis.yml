@@ -10,7 +10,7 @@ on:
 jobs:
   analyze-stocks:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 🆕 60분 → 120분 (2배 여유)
+    timeout-minutes: 120  # 타임아웃 확대
     
     steps:
     - name: 코드 체크아웃
@@ -23,16 +23,36 @@ jobs:
         
     - name: 필요한 패키지 설치
       run: |
+        echo "📦 패키지 설치 시작..."
         pip install --upgrade pip
         pip install -r requirements.txt
+        echo "✅ 패키지 설치 완료"
         
     - name: 주식 분석 실행
       id: analyze
-      timeout-minutes: 100  # 🆕 50분 → 100분 (2배 여유)
+      timeout-minutes: 100
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PYTHONUNBUFFERED: 1
       run: |
-        python stock_recommendation_with_exchange.py
+        echo "=========================================="
+        echo "🔍 디버깅 정보"
+        echo "=========================================="
+        echo "현재 디렉토리: $(pwd)"
+        echo ""
+        echo "Python 파일 목록:"
+        ls -lh *.py
+        echo ""
+        echo "Python 버전:"
+        python --version
+        echo ""
+        echo "설치된 패키지:"
+        pip list | grep -E "pykrx|pandas|numpy|requests|pytz"
+        echo ""
+        echo "=========================================="
+        echo "🚀 스크립트 실행 시작"
+        echo "=========================================="
+        python -u stock_recommendation_with_exchange.py
       continue-on-error: false
         
     - name: 로그 파일 저장 (에러 발생 시)
