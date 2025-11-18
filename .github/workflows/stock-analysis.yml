@@ -1,85 +1,46 @@
-name: 주식 분석 자동 실행
+name: Update Stock Recommendations
 
 on:
   schedule:
-    # 평일 오전 8시 (한국시간 기준, UTC 23:00 = 한국시간 08:00)
-    - cron: '0 23 * * 1-5'  # 월~금요일만 실행
-  
-  workflow_dispatch:  # 수동 실행 버튼 (새로고침 기능)
+    - cron: '0 23 * * 0-4'  # 평일 오전 8시 (KST = UTC+9)
+  workflow_dispatch:  # 수동 실행 버튼
 
 jobs:
-  analyze-stocks:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 타임아웃 확대
+    
+    permissions:
+      contents: write  # gh-pages 푸시 권한
     
     steps:
-    - name: 코드 체크아웃
+    - name: Checkout repository
       uses: actions/checkout@v3
-      
-    - name: Python 설치
+    
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-        
-    - name: 필요한 패키지 설치
+    
+    - name: Install dependencies
       run: |
-        echo "📦 패키지 설치 시작..."
-        pip install --upgrade pip
-        pip install -r requirements.txt
-        echo "✅ 패키지 설치 완료"
-        
-    - name: 주식 분석 실행
-      id: analyze
-      timeout-minutes: 100
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        PYTHONUNBUFFERED: 1
+        pip install --quiet pykrx pandas matplotlib requests
+    
+    - name: Run stock scanner
       run: |
-        echo "=========================================="
-        echo "🔍 디버깅 정보"
-        echo "=========================================="
-        echo "현재 디렉토리: $(pwd)"
-        echo ""
-        echo "Python 파일 목록:"
-        ls -lh *.py
-        echo ""
-        echo "Python 버전:"
-        python --version
-        echo ""
-        echo "설치된 패키지:"
-        pip list | grep -E "pykrx|pandas|numpy|requests|pytz"
-        echo ""
-        echo "=========================================="
-        echo "🚀 스크립트 실행 시작"
-        echo "=========================================="
-        python -u stock_recommendation_with_exchange.py
-      continue-on-error: false
-        
-    - name: 로그 파일 저장 (에러 발생 시)
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: error-logs
-        path: |
-          *.log
-          output/
-        retention-days: 7
-        
-    - name: 분석 결과 업로드
-      if: success()
+        python stock_swing_trading_v3.3_complete.py
+    
+    - name: Deploy to GitHub Pages
       uses: peaceiris/actions-gh-pages@v3
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./output
+        publish_dir: ./
         publish_branch: gh-pages
-        
-    - name: 분석 완료 알림
-      if: always()
-      run: |
-        if [ "${{ steps.analyze.outcome }}" == "success" ]; then
-          echo "✅ 주식 분석 성공!"
-          echo "📊 웹페이지: https://jediydc-cloud.github.io/stock-recommendation/"
-        else
-          echo "❌ 주식 분석 실패!"
-          echo "🔍 로그를 확인하세요."
-        fi
+        keep_files: false
+        exclude_assets: |
+          .github
+          *.py
+          *.md
+          .gitignore
+          README.md
+          LICENSE
+          requirements.txt
