@@ -490,7 +490,7 @@ def generate_html_report(results, total_analyzed, total_success):
     top_rsi = sorted([r for r in results if r['details'].get('RSI', 100) < 35], 
                      key=lambda x: x['details']['RSI'])[:5]
     top_disparity = sorted([r for r in results if '이격도' in r['details']], 
-                          key=lambda x: float(r['details']['이격도'].replace('%', '')))[:5]
+                          key=lambda x: float(x['details']['이격도'].replace('%', '')))[:5]
     top_volume = sorted([r for r in results if '거래량비율' in r['details']], 
                        key=lambda x: float(r['details']['거래량비율'].replace('배', '')), 
                        reverse=True)[:5]
