@@ -37,11 +37,5 @@ jobs:
         publish_dir: ./
         publish_branch: gh-pages
         keep_files: false
-        exclude_assets: |
-          .github
-          *.py
-          *.md
-          .gitignore
-          README.md
-          LICENSE
-          requirements.txt
+        exclude_assets: '.github,*.py,*.md,*.txt,.gitignore'
+
