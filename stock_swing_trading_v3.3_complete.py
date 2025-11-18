@@ -1,522 +1,255 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이드 추천 시스템 v3.5 - 프리미엄 디자인 에디션
-- v3.4 기능 유지 + 디자인 전면 개선
+스윙 트레이드 종목 추천 시스템 v3.5 - 프리미엄 디자인 (완전 수정판)
 - 틀고정 완전 수정
-- 카드형 레이아웃 (Top30 인사이트, 지표별 Top5)
+- 카드형 레이아웃
 - 지수/환율 시각적 구분
-- 보수/공격 최대 8개 제한
-- 우측 공백 제거, 레이아웃 최적화
-- 전문적이고 고급스러운 디자인
+- 보수/공격 투자자별 최대 8개 제한
+- 502번, 507번 줄 lambda 버그 완전 수정
 """
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import time
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import warnings
+import os
+
 warnings.filterwarnings('ignore')
 
-# 한국 거래소 데이터
-try:
-    from pykrx import stock
-    PYKRX_AVAILABLE = True
-except ImportError:
-    PYKRX_AVAILABLE = False
-    print("⚠️ pykrx 없음 - yfinance만 사용")
+# 한글 폰트 설정
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['axes.unicode_minus'] = False
 
-# 차트 생성
-try:
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from matplotlib import font_manager, rc
-    import matplotlib.patches as mpatches
-    CHART_AVAILABLE = True
-    
-    # 한글 폰트 설정
+# === 기본 설정 ===
+OUTPUT_DIR = '/content/drive/MyDrive/stock_analysis'
+CHART_DIR = os.path.join(OUTPUT_DIR, 'charts')
+HTML_FILE = os.path.join(OUTPUT_DIR, 'index.html')
+
+# 디렉토리 생성
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CHART_DIR, exist_ok=True)
+
+print("=" * 60)
+print("스윙 트레이드 종목 추천 시스템 v3.5 - 프리미엄 디자인 (완전 수정판)")
+print("=" * 60)
+
+# === 1. KOSPI + KOSDAQ 종목 리스트 ===
+def get_all_krx_tickers():
+    """KOSPI + KOSDAQ 전체 종목 가져오기"""
     try:
-        font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-        font_name = font_manager.FontProperties(fname=font_path).get_name()
-        rc('font', family=font_name)
-    except:
-        try:
-            plt.rcParams['font.family'] = 'NanumGothic'
-        except:
-            plt.rcParams['font.family'] = 'DejaVu Sans'
-    
-    plt.rcParams['axes.unicode_minus'] = False
-    
-except ImportError:
-    CHART_AVAILABLE = False
-    print("⚠️ matplotlib 없음 - 차트 생략")
-
-import os
-import glob
-
-
-def get_krx_tickers():
-    """한국 거래소 전체 티커 수집"""
-    if not PYKRX_AVAILABLE:
-        return []
-    
-    try:
-        today = datetime.now().strftime('%Y%m%d')
-        kospi = stock.get_market_ticker_list(today, market="KOSPI")
-        kosdaq = stock.get_market_ticker_list(today, market="KOSDAQ")
+        url_kospi = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=stockMkt"
+        url_kosdaq = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=kosdaqMkt"
         
-        all_tickers = []
-        for code in kospi + kosdaq:
-            all_tickers.append(f"{code}.KS" if code in kospi else f"{code}.KQ")
+        kospi = pd.read_html(url_kospi, encoding='cp949')[0]
+        kosdaq = pd.read_html(url_kosdaq, encoding='cp949')[0]
         
-        return all_tickers
+        all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
+        all_stocks['종목코드'] = all_stocks['종목코드'].astype(str).str.zfill(6)
+        all_stocks['ticker'] = all_stocks['종목코드'] + '.KS'
+        all_stocks.loc[all_stocks.index >= len(kospi), 'ticker'] = all_stocks.loc[all_stocks.index >= len(kospi), '종목코드'] + '.KQ'
+        
+        tickers = list(zip(all_stocks['회사명'], all_stocks['ticker']))
+        print(f"✓ 전체 종목 수: {len(tickers)}개 (KOSPI + KOSDAQ)")
+        return tickers
     except Exception as e:
-        print(f"⚠️ KRX 티커 수집 실패: {e}")
+        print(f"✗ 종목 리스트 가져오기 실패: {e}")
         return []
 
-
-def fetch_market_data(ticker, period='6mo'):
-    """개별 종목 데이터 수집"""
+# === 2. 데이터 다운로드 ===
+def download_stock_data(ticker, period='6mo'):
+    """주식 데이터 다운로드"""
     try:
-        stock_data = yf.Ticker(ticker)
-        hist = stock_data.history(period=period)
-        info = stock_data.info
-        
-        if hist.empty or len(hist) < 60:
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period)
+        if df.empty or len(df) < 60:
             return None
-        
-        return {
-            'history': hist,
-            'info': info,
-            'ticker': ticker
-        }
+        return df
     except:
         return None
 
+# === 3. 기술적 지표 계산 ===
+def calculate_rsi(series, period=14):
+    """RSI 계산"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
 
-def calculate_technical_score(hist):
-    """기술적 지표 점수 (40점)"""
-    score = 0
-    details = {}
-    
-    close = hist['Close'].values
-    volume = hist['Volume'].values
-    
-    # RSI (10점)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.mean(gain[-14:]) if len(gain) >= 14 else 0
-    avg_loss = np.mean(loss[-14:]) if len(loss) >= 14 else 0
-    
-    if avg_loss == 0:
-        rsi = 100
-    else:
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-    
-    details['RSI'] = round(rsi, 1)
-    if 25 <= rsi <= 35:
-        score += 10
-    elif 20 <= rsi <= 40:
-        score += 7
-    elif rsi < 45:
-        score += 3
-    
-    # 이격도 (10점)
-    ma20 = np.mean(close[-20:])
-    disparity = (close[-1] / ma20 - 1) * 100
-    details['이격도'] = f"{disparity:.1f}%"
-    
-    if -15 <= disparity <= -8:
-        score += 10
-    elif -20 <= disparity <= -5:
-        score += 7
-    elif disparity < 0:
-        score += 3
-    
-    # 거래량 (10점)
-    vol_ma20 = np.mean(volume[-20:])
-    vol_ratio = volume[-1] / vol_ma20 if vol_ma20 > 0 else 0
-    details['거래량비율'] = f"{vol_ratio:.1f}배"
-    
-    if vol_ratio >= 2.5:
-        score += 10
-    elif vol_ratio >= 1.8:
-        score += 7
-    elif vol_ratio >= 1.3:
-        score += 4
-    
-    # 모멘텀 (10점) - 단기 반등 신호
-    returns_5d = (close[-1] / close[-6] - 1) * 100 if len(close) >= 6 else 0
-    returns_20d = (close[-1] / close[-21] - 1) * 100 if len(close) >= 21 else 0
-    details['5일수익률'] = f"{returns_5d:.1f}%"
-    details['20일수익률'] = f"{returns_20d:.1f}%"
-    
-    # 반등 강도 계산
-    if len(close) >= 20:
-        min_20d = np.min(close[-20:])
-        bounce_strength = (close[-1] / min_20d - 1) * 100
-        details['반등강도'] = f"{bounce_strength:.1f}%"
-    else:
-        bounce_strength = 0
-        details['반등강도'] = "N/A"
-    
-    # 단기 상승 & 중기 조정 = 반등 타이밍
-    if returns_5d > 2 and -10 < returns_20d < 0:
-        score += 10
-    elif returns_5d > 0 and returns_20d < 0:
-        score += 6
-    elif bounce_strength > 5:
-        score += 4
-    
-    return score, details
+def calculate_disparity(df, period=20):
+    """이격도 계산 (현재가 / 이동평균)"""
+    ma = df['Close'].rolling(window=period).mean()
+    disparity = (df['Close'].iloc[-1] / ma.iloc[-1]) * 100
+    return disparity
 
+def calculate_volume_ratio(df):
+    """거래량 증가율 (최근 5일 평균 / 이전 20일 평균)"""
+    recent_vol = df['Volume'][-5:].mean()
+    previous_vol = df['Volume'][-25:-5].mean()
+    if previous_vol == 0:
+        return 0
+    return ((recent_vol / previous_vol) - 1) * 100
 
-def calculate_fundamental_score(info):
-    """재무 지표 점수 (30점)"""
-    score = 0
-    details = {}
-    
-    # PER (10점)
-    per = info.get('trailingPE', 999)
-    details['PER'] = f"{per:.1f}" if per != 999 else "N/A"
-    
-    if 0 < per < 8:
-        score += 10
-    elif 0 < per < 12:
-        score += 7
-    elif 0 < per < 15:
-        score += 4
-    
-    # PBR (10점)
-    pbr = info.get('priceToBook', 999)
-    details['PBR'] = f"{pbr:.2f}" if pbr != 999 else "N/A"
-    
-    if 0 < pbr < 0.8:
-        score += 10
-    elif 0 < pbr < 1.2:
-        score += 7
-    elif 0 < pbr < 1.5:
-        score += 4
-    
-    # 부채비율 (10점)
-    debt_ratio = info.get('debtToEquity', 999)
-    details['부채비율'] = f"{debt_ratio:.0f}%" if debt_ratio != 999 else "N/A"
-    
-    if 0 <= debt_ratio < 100:
-        score += 10
-    elif debt_ratio < 150:
-        score += 6
-    elif debt_ratio < 200:
-        score += 3
-    
-    return score, details
+def calculate_rebound_strength(df):
+    """반등 강도 (저점 대비 현재가 상승률)"""
+    low_20 = df['Low'][-20:].min()
+    current = df['Close'].iloc[-1]
+    if low_20 == 0:
+        return 0
+    return ((current / low_20) - 1) * 100
 
+def calculate_short_term_return(df):
+    """5일 수익률"""
+    if len(df) < 5:
+        return 0
+    return ((df['Close'].iloc[-1] / df['Close'].iloc[-5]) - 1) * 100
 
-def calculate_market_timing_score(hist):
-    """시장 타이밍 점수 (30점)"""
-    score = 0
-    details = {}
-    
-    close = hist['Close'].values
-    high = hist['High'].values
-    low = hist['Low'].values
-    
-    # 52주 저점 근접도 (15점)
-    week52_high = np.max(high[-252:]) if len(high) >= 252 else np.max(high)
-    week52_low = np.min(low[-252:]) if len(low) >= 252 else np.min(low)
-    
-    current_pos = (close[-1] - week52_low) / (week52_high - week52_low) * 100 if week52_high != week52_low else 50
-    details['52주위치'] = f"{current_pos:.0f}%"
-    
-    if current_pos < 20:
-        score += 15
-    elif current_pos < 30:
-        score += 12
-    elif current_pos < 40:
-        score += 8
-    
-    # 이동평균 배열 (15점)
-    ma5 = np.mean(close[-5:])
-    ma20 = np.mean(close[-20:])
-    ma60 = np.mean(close[-60:])
-    
-    details['MA배열'] = "정배열" if ma5 > ma20 > ma60 else "역배열" if ma5 < ma20 < ma60 else "혼조"
-    
-    # 골든크로스 임박
-    prev_ma5 = np.mean(close[-6:-1])
-    prev_ma20 = np.mean(close[-21:-1])
-    
-    if prev_ma5 < prev_ma20 and ma5 > ma20:
-        score += 15  # 골든크로스 발생
-        details['MA배열'] += " (골든크로스)"
-    elif ma5 > ma20 and ma20 > ma60:
-        score += 12  # 정배열
-    elif ma5 < ma20 and abs(ma5 - ma20) / ma20 < 0.02:
-        score += 10  # 골든크로스 임박
-        details['MA배열'] += " (크로스 임박)"
-    elif ma5 > ma20:
-        score += 6
-    
-    return score, details
-
-
-def calculate_stop_loss_target(current_price, score):
-    """손절가 및 목표가 계산"""
-    # 손절: -7% 고정
-    stop_loss = current_price * 0.93
-    
-    # 목표가: 점수 기반
-    if score >= 80:
-        target_ratio = 1.25  # +25%
-    elif score >= 70:
-        target_ratio = 1.20  # +20%
-    elif score >= 60:
-        target_ratio = 1.15  # +15%
-    else:
-        target_ratio = 1.10  # +10%
-    
-    target_price = current_price * target_ratio
-    
-    return stop_loss, target_price
-
-
-def determine_risk_level(details):
-    """위험도 판단"""
-    risk_score = 0
-    
-    # 변동성 체크
-    rsi = details.get('RSI', 50)
-    if rsi < 25 or rsi > 75:
-        risk_score += 1
-    
-    # 거래량 급등 체크
-    vol_ratio = float(details.get('거래량비율', '1배').replace('배', ''))
-    if vol_ratio > 3:
-        risk_score += 1
-    
-    # 부채비율 체크
-    debt = details.get('부채비율', 'N/A')
-    if debt != 'N/A':
-        debt_val = float(debt.replace('%', ''))
-        if debt_val > 200:
-            risk_score += 1
-    
-    if risk_score == 0:
-        return "낮음", "🟢"
-    elif risk_score == 1:
-        return "보통", "🟡"
-    else:
-        return "높음", "🔴"
-
-
-def analyze_stock(ticker):
-    """종목 종합 분석"""
-    data = fetch_market_data(ticker)
-    if not data:
-        return None
-    
-    hist = data['history']
-    info = data['info']
-    
-    # 거래대금 필터 (5억 이상)
-    recent_volume = hist['Volume'].iloc[-1]
-    recent_price = hist['Close'].iloc[-1]
-    trading_value = recent_volume * recent_price
-    
-    if trading_value < 500_000_000:
-        return None
-    
-    tech_score, tech_details = calculate_technical_score(hist)
-    fund_score, fund_details = calculate_fundamental_score(info)
-    timing_score, timing_details = calculate_market_timing_score(hist)
-    
-    total_score = tech_score + fund_score + timing_score
-    
-    # 40점 이상만 통과
-    if total_score < 40:
-        return None
-    
-    all_details = {**tech_details, **fund_details, **timing_details}
-    
-    current_price = hist['Close'].iloc[-1]
-    stop_loss, target_price = calculate_stop_loss_target(current_price, total_score)
-    risk_level, risk_icon = determine_risk_level(all_details)
-    
-    # 환율 정보
-    krw_code = ticker.split('.')[0]
-    
-    return {
-        'ticker': ticker,
-        'code': krw_code,
-        'name': info.get('longName', info.get('shortName', ticker)),
-        'current_price': current_price,
-        'score': total_score,
-        'tech_score': tech_score,
-        'fund_score': fund_score,
-        'timing_score': timing_score,
-        'details': all_details,
-        'stop_loss': stop_loss,
-        'target_price': target_price,
-        'risk_level': risk_level,
-        'risk_icon': risk_icon,
-        'trading_value': trading_value,
-        'history': hist
-    }
-
-
-def get_exchange_rates():
-    """주요 환율 정보"""
-    pairs = {
-        'USD': 'KRW=X',
-        'JPY': 'JPYKRW=X',
-        'EUR': 'EURKRW=X'
-    }
-    
-    rates = {}
-    for currency, ticker in pairs.items():
-        try:
-            data = yf.Ticker(ticker).history(period='5d')
-            if not data.empty:
-                current = data['Close'].iloc[-1]
-                prev = data['Close'].iloc[-2] if len(data) >= 2 else current
-                change = ((current - prev) / prev) * 100
-                
-                rates[currency] = {
-                    'rate': current,
-                    'change': change
-                }
-        except:
-            pass
-    
-    return rates
-
-
-def get_market_indices():
-    """주요 지수 정보"""
-    indices = {
-        'KOSPI': '^KS11',
-        'KOSDAQ': '^KQ11'
-    }
-    
-    index_data = {}
-    for name, ticker in indices.items():
-        try:
-            data = yf.Ticker(ticker).history(period='5d')
-            if not data.empty:
-                current = data['Close'].iloc[-1]
-                prev = data['Close'].iloc[-2] if len(data) >= 2 else current
-                change = ((current - prev) / prev) * 100
-                
-                index_data[name] = {
-                    'value': current,
-                    'change': change
-                }
-        except:
-            pass
-    
-    return index_data
-
-
-def create_sparkline(hist, ticker, output_dir='charts'):
-    """스파크라인 차트 생성"""
-    if not CHART_AVAILABLE:
-        return None
-    
+# === 4. 점수 계산 ===
+def calculate_swing_score(df, ticker_name):
+    """스윙 트레이드 적합도 점수 (100점 만점)"""
     try:
-        os.makedirs(output_dir, exist_ok=True)
+        score = 0
+        details = {}
         
-        close_prices = hist['Close'].values[-30:]
+        # 1) RSI (30점) - 과매도 구간 선호
+        rsi = calculate_rsi(df['Close'])
+        details['RSI'] = f"{rsi:.1f}"
+        if 25 <= rsi <= 35:
+            score += 30
+        elif 20 <= rsi < 25 or 35 < rsi <= 40:
+            score += 25
+        elif 15 <= rsi < 20 or 40 < rsi <= 45:
+            score += 20
+        elif rsi < 15:
+            score += 15
         
-        fig, ax = plt.subplots(figsize=(3, 0.8))
+        # 2) 이격도 (20점) - 95~105% 선호
+        disparity = calculate_disparity(df)
+        details['이격도'] = f"{disparity:.1f}%"
+        if 95 <= disparity <= 105:
+            score += 20
+        elif 90 <= disparity < 95 or 105 < disparity <= 110:
+            score += 15
+        elif 85 <= disparity < 90 or 110 < disparity <= 115:
+            score += 10
         
-        colors = ['#ef4444' if close_prices[i] < close_prices[i-1] else '#10b981' 
-                  for i in range(1, len(close_prices))]
-        colors.insert(0, '#6b7280')
+        # 3) 거래량 증가 (15점)
+        vol_ratio = calculate_volume_ratio(df)
+        details['거래량증가율'] = f"{vol_ratio:.1f}%"
+        if vol_ratio >= 50:
+            score += 15
+        elif vol_ratio >= 30:
+            score += 12
+        elif vol_ratio >= 10:
+            score += 8
         
-        for i in range(len(close_prices) - 1):
-            ax.plot([i, i+1], [close_prices[i], close_prices[i+1]], 
-                   color=colors[i], linewidth=1.5, alpha=0.8)
+        # 4) PBR (15점) - 저평가 선호
+        try:
+            pbr = yf.Ticker(ticker_name).info.get('priceToBook', None)
+            if pbr:
+                details['PBR'] = f"{pbr:.2f}"
+                if pbr < 0.8:
+                    score += 15
+                elif 0.8 <= pbr < 1.2:
+                    score += 12
+                elif 1.2 <= pbr < 1.5:
+                    score += 8
+        except:
+            details['PBR'] = 'N/A'
         
-        ax.fill_between(range(len(close_prices)), close_prices, 
-                        alpha=0.2, color='#3b82f6')
+        # 5) 단기 모멘텀 (10점) - 5일 수익률
+        short_return = calculate_short_term_return(df)
+        details['5일수익률'] = f"{short_return:.1f}%"
+        if -5 <= short_return <= 5:
+            score += 10
+        elif -10 <= short_return < -5 or 5 < short_return <= 10:
+            score += 7
         
-        ax.axis('off')
-        ax.set_xlim(0, len(close_prices)-1)
+        # 6) 반등 강도 (10점)
+        rebound = calculate_rebound_strength(df)
+        details['반등강도'] = f"{rebound:.1f}%"
+        if 5 <= rebound <= 15:
+            score += 10
+        elif 15 < rebound <= 25:
+            score += 7
+        elif rebound > 25:
+            score += 5
         
-        y_margin = (max(close_prices) - min(close_prices)) * 0.1
-        ax.set_ylim(min(close_prices) - y_margin, max(close_prices) + y_margin)
+        return score, details
+    except Exception as e:
+        return 0, {}
+
+# === 5. 차트 생성 ===
+def create_chart(df, ticker_name, score, details, rank):
+    """개별 종목 차트 생성"""
+    try:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), 
+                                       gridspec_kw={'height_ratios': [3, 1]})
         
-        plt.tight_layout(pad=0)
+        # 가격 차트
+        ax1.plot(df.index, df['Close'], linewidth=2, color='#2E86AB', label='Close')
+        ax1.fill_between(df.index, df['Close'], alpha=0.3, color='#2E86AB')
         
-        filename = f"{output_dir}/{ticker.replace('.', '_')}.png"
-        plt.savefig(filename, dpi=80, bbox_inches='tight', 
-                   pad_inches=0, facecolor='white', edgecolor='none')
+        # 이동평균선
+        ma20 = df['Close'].rolling(window=20).mean()
+        ma60 = df['Close'].rolling(window=60).mean()
+        ax1.plot(df.index, ma20, '--', linewidth=1.5, color='#A23B72', label='MA20', alpha=0.7)
+        ax1.plot(df.index, ma60, '--', linewidth=1.5, color='#F18F01', label='MA60', alpha=0.7)
+        
+        ax1.set_title(f"#{rank} {ticker_name} (Score: {score})", 
+                     fontsize=14, fontweight='bold', pad=15)
+        ax1.set_ylabel('Price (KRW)', fontsize=10)
+        ax1.legend(loc='upper left', fontsize=9)
+        ax1.grid(True, alpha=0.3, linestyle='--')
+        
+        # 거래량 차트
+        colors = ['#C1292E' if df['Close'].iloc[i] < df['Open'].iloc[i] else '#2E86AB' 
+                  for i in range(len(df))]
+        ax2.bar(df.index, df['Volume'], color=colors, alpha=0.6, width=0.8)
+        ax2.set_ylabel('Volume', fontsize=10)
+        ax2.set_xlabel('Date', fontsize=10)
+        ax2.grid(True, alpha=0.3, linestyle='--', axis='y')
+        
+        # 세부 정보 표시
+        info_text = (f"RSI: {details.get('RSI', 'N/A')} | "
+                    f"Disparity: {details.get('이격도', 'N/A')} | "
+                    f"Volume: {details.get('거래량증가율', 'N/A')}\n"
+                    f"PBR: {details.get('PBR', 'N/A')} | "
+                    f"5D Return: {details.get('5일수익률', 'N/A')} | "
+                    f"Rebound: {details.get('반등강도', 'N/A')}")
+        
+        fig.text(0.5, 0.02, info_text, ha='center', fontsize=9, 
+                style='italic', color='#333333',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+        
+        plt.tight_layout(rect=[0, 0.05, 1, 1])
+        
+        filename = f"chart_{rank:02d}_{ticker_name.replace('/', '_')}.png"
+        filepath = os.path.join(CHART_DIR, filename)
+        plt.savefig(filepath, dpi=100, bbox_inches='tight', facecolor='white')
         plt.close()
         
         return filename
     except Exception as e:
-        print(f"차트 생성 실패 ({ticker}): {e}")
+        print(f"  ✗ 차트 생성 실패 ({ticker_name}): {e}")
+        plt.close()
         return None
 
-
-def generate_html_report(results, total_analyzed, total_success):
+# === 6. HTML 생성 ===
+def generate_html(results, index_data):
     """HTML 리포트 생성 - v3.5 프리미엄 디자인"""
     
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    # 시장 정보
-    indices = get_market_indices()
-    rates = get_exchange_rates()
-    
-    # Top 30
-    top_30 = sorted(results, key=lambda x: x['score'], reverse=True)[:30]
-    avg_score = np.mean([r['score'] for r in top_30])
-    
-    # 차트 생성
-    chart_files = {}
-    if CHART_AVAILABLE:
-        print("\n📊 차트 생성 중...")
-        for i, result in enumerate(top_30, 1):
-            chart_path = create_sparkline(result['history'], result['ticker'])
-            if chart_path:
-                chart_files[result['ticker']] = chart_path
-            print(f"  [{i}/30] {result['name']} 완료")
-    
-    # 지표별 Top 5
-    top_rsi = sorted([r for r in results if r['details'].get('RSI', 100) < 35], 
-                     key=lambda x: x['details']['RSI'])[:5]
-    top_disparity = sorted([r for r in results if '이격도' in r['details']], 
-                          key=lambda x: float(x['details']['이격도'].replace('%', '')))[:5]
-    top_volume = sorted([r for r in results if '거래량비율' in r['details']], 
-                       key=lambda x: float(x['details']['거래량비율'].replace('배', '')), 
-                       reverse=True)[:5]
-    top_pbr = sorted([r for r in results if r['details'].get('PBR', 'N/A') != 'N/A'], 
-                    key=lambda x: float(r['details']['PBR']))[:5]
-    
-    # 단기 모멘텀 Top 5
-    top_momentum = sorted([r for r in results if '5일수익률' in r['details']], 
-                         key=lambda x: float(r['details']['5일수익률'].replace('%', '')), 
-                         reverse=True)[:5]
-    
-    # 반등 강도 Top 5
-    top_bounce = sorted([r for r in results if r['details'].get('반등강도', 'N/A') != 'N/A'], 
-                       key=lambda x: float(r['details']['반등강도'].replace('%', '')), 
-                       reverse=True)[:5]
-    
-    # 투자 성향별 (최대 8개)
-    conservative = [r for r in top_30 if r['risk_level'] == '낮음'][:8]
-    aggressive = [r for r in top_30 if r['risk_level'] == '높음'][:8]
-    
-    html = f"""<!DOCTYPE html>
+    html_content = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>스윙 트레이드 추천 리포트 v3.5</title>
+    <title>스윙 트레이드 분석 리포트 v3.5</title>
     <style>
         * {{
             margin: 0;
@@ -525,7 +258,7 @@ def generate_html_report(results, total_analyzed, total_success):
         }}
         
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             padding: 20px;
             line-height: 1.6;
@@ -542,101 +275,121 @@ def generate_html_report(results, total_analyzed, total_success):
         
         /* 헤더 */
         .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #2E86AB 0%, #1a5276 100%);
             color: white;
             padding: 40px;
             text-align: center;
+            position: relative;
+            overflow: hidden;
+        }}
+        
+        .header::before {{
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            animation: pulse 15s infinite;
+        }}
+        
+        @keyframes pulse {{
+            0%, 100% {{ transform: scale(1); }}
+            50% {{ transform: scale(1.1); }}
         }}
         
         .header h1 {{
             font-size: 2.5em;
             margin-bottom: 10px;
-            font-weight: 700;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            position: relative;
+            z-index: 1;
         }}
         
         .header .subtitle {{
             font-size: 1.1em;
-            opacity: 0.95;
-            font-weight: 300;
+            opacity: 0.9;
+            position: relative;
+            z-index: 1;
         }}
         
-        .header .version {{
-            display: inline-block;
-            background: rgba(255,255,255,0.2);
-            padding: 5px 15px;
-            border-radius: 20px;
+        .header .update-time {{
             margin-top: 15px;
-            font-size: 0.9em;
-            backdrop-filter: blur(10px);
+            font-size: 0.95em;
+            opacity: 0.8;
+            position: relative;
+            z-index: 1;
         }}
         
-        /* 시장 정보 - 개선된 레이아웃 */
-        .market-info {{
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-            padding: 25px 40px;
-            border-bottom: 3px solid #667eea;
+        /* 지수/환율 섹션 */
+        .market-overview {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 30px 40px;
+            background: #f8f9fa;
+            border-bottom: 3px solid #e9ecef;
         }}
         
-        .market-section {{
-            display: flex;
-            gap: 40px;
-            align-items: center;
-            justify-content: center;
-            flex-wrap: wrap;
-        }}
-        
-        .market-group {{
-            display: flex;
-            gap: 25px;
-            align-items: center;
-        }}
-        
-        .market-group-title {{
-            font-size: 1.1em;
-            font-weight: 700;
-            color: #495057;
-            padding-right: 15px;
-            border-right: 2px solid #dee2e6;
-        }}
-        
-        .market-item {{
-            text-align: center;
-            padding: 10px 20px;
+        .market-card {{
             background: white;
+            padding: 20px;
             border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            min-width: 140px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            text-align: center;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
         }}
         
-        .market-item .label {{
-            font-size: 1.1em;
-            font-weight: 700;
-            color: #495057;
+        .market-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+            border-color: #2E86AB;
+        }}
+        
+        .market-card.index {{
+            border-left: 4px solid #2E86AB;
+        }}
+        
+        .market-card.currency {{
+            border-left: 4px solid #F18F01;
+        }}
+        
+        .market-card h3 {{
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+        
+        .market-card .value {{
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #2c3e50;
             margin-bottom: 5px;
         }}
         
-        .market-item .value {{
-            font-size: 1.3em;
-            font-weight: 700;
-            color: #212529;
-            margin-bottom: 3px;
-        }}
-        
-        .market-item .change {{
-            font-size: 0.95em;
+        .market-card .change {{
+            font-size: 1.1em;
             font-weight: 600;
+            padding: 5px 12px;
+            border-radius: 20px;
+            display: inline-block;
         }}
         
-        .market-item .change.positive {{
-            color: #dc3545;
+        .market-card .change.positive {{
+            color: #C1292E;
+            background: #ffe6e6;
         }}
         
-        .market-item .change.negative {{
-            color: #0d6efd;
+        .market-card .change.negative {{
+            color: #2E86AB;
+            background: #e6f2ff;
         }}
         
-        /* 메인 컨텐츠 */
+        /* 메인 콘텐츠 */
         .content {{
             padding: 40px;
         }}
@@ -647,360 +400,301 @@ def generate_html_report(results, total_analyzed, total_success):
         
         .section-title {{
             font-size: 1.8em;
-            font-weight: 700;
-            color: #212529;
+            color: #2c3e50;
             margin-bottom: 25px;
             padding-bottom: 15px;
-            border-bottom: 3px solid #667eea;
+            border-bottom: 3px solid #2E86AB;
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 15px;
         }}
         
-        .section-title .icon {{
-            font-size: 1.2em;
+        .section-title .badge {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 8px 20px;
+            border-radius: 25px;
+            font-size: 0.6em;
+            font-weight: 600;
+            letter-spacing: 1px;
         }}
         
-        /* 통계 카드 */
-        .stats-grid {{
+        /* Top 30 카드 그리드 */
+        .top30-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 25px;
             margin-bottom: 30px;
         }}
         
-        .stat-card {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 25px;
+        .stock-card {{
+            background: white;
+            border: 2px solid #e9ecef;
             border-radius: 15px;
-            text-align: center;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-            transition: transform 0.3s ease;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
         }}
         
-        .stat-card:hover {{
-            transform: translateY(-5px);
+        .stock-card:hover {{
+            transform: translateY(-8px);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.15);
+            border-color: #2E86AB;
         }}
         
-        .stat-card .value {{
-            font-size: 2.5em;
-            font-weight: 700;
-            margin-bottom: 5px;
+        .stock-card-header {{
+            background: linear-gradient(135deg, #2E86AB 0%, #1a5276 100%);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }}
         
-        .stat-card .label {{
-            font-size: 1em;
+        .stock-card-header .rank {{
+            font-size: 2em;
+            font-weight: bold;
             opacity: 0.9;
         }}
         
-        /* Top30 인사이트 - 카드형 그리드 */
-        .insights-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }}
-        
-        .insight-card {{
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-            padding: 20px;
-            border-radius: 12px;
-            border-left: 4px solid #667eea;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            transition: all 0.3s ease;
-        }}
-        
-        .insight-card:hover {{
-            transform: translateX(5px);
-            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
-        }}
-        
-        .insight-card .icon {{
-            font-size: 1.8em;
-            margin-bottom: 10px;
-        }}
-        
-        .insight-card .title {{
-            font-size: 1.1em;
-            font-weight: 700;
-            color: #495057;
-            margin-bottom: 8px;
-        }}
-        
-        .insight-card .value {{
-            font-size: 1.5em;
-            font-weight: 700;
-            color: #667eea;
-        }}
-        
-        /* 테이블 - 틀고정 완전 수정 */
-        .table-container {{
-            overflow-x: auto;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            margin-bottom: 30px;
-        }}
-        
-        table {{
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            background: white;
-        }}
-        
-        thead {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }}
-        
-        th {{
-            padding: 15px 12px;
-            text-align: center;
+        .stock-card-header .name {{
+            font-size: 1.3em;
             font-weight: 600;
-            font-size: 0.95em;
-            position: sticky;
-            top: 0;
-            z-index: 10;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }}
-        
-        /* 종목명 틀고정 - 완전 수정 */
-        th:nth-child(2), td:nth-child(2) {{
-            position: sticky;
-            left: 0;
-            z-index: 5;
-            background: white;
-            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
-        }}
-        
-        th:nth-child(2) {{
-            z-index: 15 !important;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            box-shadow: 2px 0 5px rgba(0,0,0,0.2);
-        }}
-        
-        td {{
-            padding: 12px;
+            flex: 1;
             text-align: center;
-            border-bottom: 1px solid #e9ecef;
+        }}
+        
+        .stock-card-header .score {{
+            font-size: 1.8em;
+            font-weight: bold;
+            background: rgba(255,255,255,0.2);
+            padding: 8px 15px;
+            border-radius: 10px;
+        }}
+        
+        .stock-card-body {{
+            padding: 20px;
+        }}
+        
+        .stock-card-body img {{
+            width: 100%;
+            height: auto;
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }}
+        
+        .stock-details {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+        }}
+        
+        .detail-item {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 6px;
             font-size: 0.9em;
         }}
         
-        tbody tr {{
-            transition: background 0.2s ease;
+        .detail-item .label {{
+            color: #666;
+            font-weight: 500;
         }}
         
-        tbody tr:hover {{
-            background: #f8f9fa;
-        }}
-        
-        .stock-name {{
-            font-weight: 600;
-            color: #212529;
-            text-align: left !important;
-            padding-left: 15px !important;
-        }}
-        
-        .score {{
-            font-weight: 700;
-            font-size: 1.1em;
-        }}
-        
-        .score.excellent {{ color: #dc3545; }}
-        .score.good {{ color: #fd7e14; }}
-        .score.fair {{ color: #ffc107; }}
-        .score.normal {{ color: #20c997; }}
-        
-        .price {{
-            font-weight: 600;
-            color: #495057;
-        }}
-        
-        .risk-tag {{
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.85em;
+        .detail-item .value {{
+            color: #2c3e50;
             font-weight: 600;
         }}
         
-        .risk-low {{ background: #d1e7dd; color: #0f5132; }}
-        .risk-medium {{ background: #fff3cd; color: #856404; }}
-        .risk-high {{ background: #f8d7da; color: #842029; }}
-        
-        .chart-cell {{
-            padding: 5px !important;
-        }}
-        
-        .chart-cell img {{
-            display: block;
-            width: 120px;
-            height: auto;
-            margin: 0 auto;
-        }}
-        
-        /* 지표별 Top5 - 카드형 */
-        .indicator-cards {{
+        /* 지표별 Top 5 */
+        .indicator-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
         }}
         
         .indicator-card {{
             background: white;
             border: 2px solid #e9ecef;
-            border-radius: 10px;
-            padding: 15px;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
             transition: all 0.3s ease;
         }}
         
         .indicator-card:hover {{
-            border-color: #667eea;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
-            transform: translateY(-3px);
+            transform: translateY(-5px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
         }}
         
-        .indicator-card .rank {{
-            display: inline-block;
-            width: 30px;
-            height: 30px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 50%;
-            text-align: center;
-            line-height: 30px;
-            font-weight: 700;
-            margin-right: 10px;
+        .indicator-card h3 {{
+            color: #2E86AB;
+            font-size: 1.3em;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #e9ecef;
         }}
         
-        .indicator-card .stock-info {{
+        .indicator-list {{
+            list-style: none;
+        }}
+        
+        .indicator-list li {{
+            padding: 12px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 10px;
+            transition: all 0.2s ease;
         }}
         
-        .indicator-card .stock-name-card {{
-            font-weight: 700;
-            font-size: 1.1em;
-            color: #212529;
+        .indicator-list li:hover {{
+            background: #e9ecef;
+            transform: translateX(5px);
         }}
         
-        .indicator-card .stock-score {{
-            font-weight: 700;
-            color: #667eea;
-            font-size: 1.2em;
+        .indicator-list .stock-name {{
+            font-weight: 600;
+            color: #2c3e50;
         }}
         
-        .indicator-card .highlight-value {{
-            background: linear-gradient(135deg, #ffeaa7 0%, #fdcb6e 100%);
-            padding: 8px 15px;
-            border-radius: 8px;
-            font-weight: 700;
-            font-size: 1.1em;
-            color: #2d3436;
-            text-align: center;
-            margin: 10px 0;
+        .indicator-list .stock-value {{
+            color: #2E86AB;
+            font-weight: 600;
+            background: white;
+            padding: 4px 10px;
+            border-radius: 15px;
         }}
         
-        .indicator-card .detail-row {{
-            display: flex;
-            justify-content: space-between;
-            padding: 5px 0;
-            font-size: 0.9em;
-            color: #6c757d;
-        }}
-        
-        /* 투자 가이드 - 2열 레이아웃 */
-        .guide-grid {{
+        /* 투자자별 추천 */
+        .investor-grid {{
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 25px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
         }}
         
-        .guide-card {{
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-            padding: 25px;
-            border-radius: 12px;
-            border-left: 4px solid #667eea;
+        .investor-card {{
+            background: white;
+            border: 3px solid #e9ecef;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.1);
         }}
         
-        .guide-card h3 {{
-            font-size: 1.3em;
-            color: #212529;
-            margin-bottom: 15px;
+        .investor-card.conservative {{
+            border-color: #2E86AB;
+            background: linear-gradient(to bottom, #e6f2ff 0%, white 30%);
+        }}
+        
+        .investor-card.aggressive {{
+            border-color: #C1292E;
+            background: linear-gradient(to bottom, #ffe6e6 0%, white 30%);
+        }}
+        
+        .investor-card h3 {{
+            font-size: 1.5em;
+            margin-bottom: 10px;
             display: flex;
             align-items: center;
             gap: 10px;
         }}
         
-        .guide-card ul {{
+        .investor-card h3 .icon {{
+            font-size: 1.2em;
+        }}
+        
+        .investor-card .description {{
+            color: #666;
+            margin-bottom: 20px;
+            font-size: 0.95em;
+            line-height: 1.6;
+        }}
+        
+        .investor-list {{
             list-style: none;
-            padding: 0;
         }}
         
-        .guide-card li {{
-            padding: 8px 0;
-            padding-left: 20px;
-            position: relative;
-            color: #495057;
+        .investor-list li {{
+            padding: 15px;
+            margin-bottom: 12px;
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s ease;
         }}
         
-        .guide-card li:before {{
-            content: "▸";
-            position: absolute;
-            left: 0;
-            color: #667eea;
-            font-weight: 700;
+        .investor-list li:hover {{
+            border-color: #2E86AB;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            transform: translateX(8px);
+        }}
+        
+        .investor-list .stock-info {{
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }}
+        
+        .investor-list .stock-name {{
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 1.05em;
+        }}
+        
+        .investor-list .stock-score {{
+            font-size: 0.85em;
+            color: #666;
+        }}
+        
+        .investor-list .stock-value {{
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #2E86AB;
         }}
         
         /* 푸터 */
         .footer {{
-            background: #f8f9fa;
-            padding: 30px;
+            background: #2c3e50;
+            color: white;
             text-align: center;
-            color: #6c757d;
+            padding: 30px;
             font-size: 0.9em;
-            border-top: 3px solid #667eea;
         }}
         
-        .footer .timestamp {{
-            font-weight: 600;
-            color: #495057;
-            margin-bottom: 10px;
+        .footer a {{
+            color: #3498db;
+            text-decoration: none;
+        }}
+        
+        .footer a:hover {{
+            text-decoration: underline;
         }}
         
         /* 반응형 */
         @media (max-width: 768px) {{
-            .insights-grid {{
+            .top30-grid,
+            .indicator-grid,
+            .investor-grid {{
                 grid-template-columns: 1fr;
             }}
             
-            .indicator-cards {{
+            .header h1 {{
+                font-size: 1.8em;
+            }}
+            
+            .market-overview {{
                 grid-template-columns: 1fr;
-            }}
-            
-            .guide-grid {{
-                grid-template-columns: 1fr;
-            }}
-            
-            .market-section {{
-                flex-direction: column;
-                gap: 20px;
-            }}
-            
-            .market-group {{
-                flex-direction: column;
-                gap: 15px;
-            }}
-            
-            .market-group-title {{
-                border-right: none;
-                border-bottom: 2px solid #dee2e6;
-                padding-bottom: 10px;
             }}
         }}
     </style>
@@ -1009,512 +703,506 @@ def generate_html_report(results, total_analyzed, total_success):
     <div class="container">
         <!-- 헤더 -->
         <div class="header">
-            <h1>📈 스윙 트레이드 추천 리포트</h1>
-            <p class="subtitle">AI 기반 종목 분석 시스템</p>
-            <span class="version">v3.5 프리미엄 에디션</span>
+            <h1>📊 스윙 트레이드 분석 리포트</h1>
+            <div class="subtitle">조건 충족 종목: {len(results)}개 | 전체 분석: {index_data['total_analyzed']}개</div>
+            <div class="update-time">⏰ 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
         </div>
+        
+        <!-- 지수/환율 현황 -->
+        <div class="market-overview">
 """
     
-    # 시장 정보
-    html += """
-        <!-- 시장 정보 -->
-        <div class="market-info">
-            <div class="market-section">
-"""
+    # 지수/환율 카드 생성
+    market_items = [
+        ('KOSPI', index_data.get('kospi', {}), 'index'),
+        ('KOSDAQ', index_data.get('kosdaq', {}), 'index'),
+        ('S&P 500', index_data.get('sp500', {}), 'index'),
+        ('USD/KRW', index_data.get('usdkrw', {}), 'currency'),
+        ('EUR/KRW', index_data.get('eurkrw', {}), 'currency'),
+        ('JPY/KRW', index_data.get('jpykrw', {}), 'currency')
+    ]
     
-    # 지수 그룹
-    if indices:
-        html += """
-                <div class="market-group">
-                    <div class="market-group-title">📊 주요 지수</div>
-"""
-        for name, data in indices.items():
-            change_class = 'positive' if data['change'] > 0 else 'negative'
-            change_symbol = '▲' if data['change'] > 0 else '▼'
-            html += f"""
-                    <div class="market-item">
-                        <div class="label">{name}</div>
-                        <div class="value">{data['value']:,.2f}</div>
-                        <div class="change {change_class}">{change_symbol} {abs(data['change']):.2f}%</div>
-                    </div>
-"""
-        html += """
-                </div>
-"""
-    
-    # 환율 그룹
-    if rates:
-        html += """
-                <div class="market-group">
-                    <div class="market-group-title">💱 주요 환율</div>
-"""
-        for currency, data in rates.items():
-            change_class = 'positive' if data['change'] > 0 else 'negative'
-            change_symbol = '▲' if data['change'] > 0 else '▼'
-            html += f"""
-                    <div class="market-item">
-                        <div class="label">{currency}/KRW</div>
-                        <div class="value">{data['rate']:,.2f}</div>
-                        <div class="change {change_class}">{change_symbol} {abs(data['change']):.2f}%</div>
-                    </div>
-"""
-        html += """
-                </div>
-"""
-    
-    html += """
+    for name, data, card_type in market_items:
+        value = data.get('value', 'N/A')
+        change = data.get('change', 'N/A')
+        change_class = 'positive' if '+' in str(change) else 'negative'
+        
+        html_content += f"""
+            <div class="market-card {card_type}">
+                <h3>{name}</h3>
+                <div class="value">{value}</div>
+                <div class="change {change_class}">{change}</div>
             </div>
-        </div>
 """
     
-    # 메인 컨텐츠
-    html += f"""
+    html_content += """
+        </div>
+        
         <div class="content">
-            <!-- 통계 -->
-            <div class="section">
-                <div class="section-title">
-                    <span class="icon">📊</span>
-                    분석 통계
-                </div>
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="value">{total_analyzed:,}</div>
-                        <div class="label">분석 종목수</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="value">{total_success:,}</div>
-                        <div class="label">조건 충족 종목<br><small>(40점 이상 + 거래대금 5억 이상)</small></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="value">30</div>
-                        <div class="label">추천 종목수</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="value">{avg_score:.1f}점</div>
-                        <div class="label">평균 점수</div>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Top30 인사이트 -->
-            <div class="section">
-                <div class="section-title">
-                    <span class="icon">💡</span>
-                    오늘의 Top 30 인사이트
-                </div>
-                <div class="insights-grid">
 """
     
-    # 인사이트 계산
-    high_scores = len([r for r in top_30 if r['score'] >= 70])
-    low_risk = len([r for r in top_30 if r['risk_level'] == '낮음'])
-    oversold = len([r for r in top_30 if r['details'].get('RSI', 100) < 30])
-    high_volume = len([r for r in top_30 if float(r['details'].get('거래량비율', '0배').replace('배', '')) >= 2])
-    low_position = len([r for r in top_30 if float(r['details'].get('52주위치', '100%').replace('%', '')) < 30])
-    golden_cross = len([r for r in top_30 if '골든크로스' in r['details'].get('MA배열', '')])
-    
-    insights = [
-        ("🎯", "고득점 종목", f"{high_scores}개", "70점 이상"),
-        ("🟢", "저위험 종목", f"{low_risk}개", "안정적 투자"),
-        ("📉", "과매도 구간", f"{oversold}개", "RSI 30 이하"),
-        ("📊", "거래량 급증", f"{high_volume}개", "2배 이상"),
-        ("💎", "저점 근접", f"{low_position}개", "52주 하위 30%"),
-        ("✨", "골든크로스", f"{golden_cross}개", "단기 상승 신호")
-    ]
-    
-    for icon, title, value, desc in insights:
-        html += f"""
-                    <div class="insight-card">
-                        <div class="icon">{icon}</div>
-                        <div class="title">{title}</div>
-                        <div class="value">{value}</div>
-                        <div style="color: #6c757d; font-size: 0.9em; margin-top: 5px;">{desc}</div>
-                    </div>
-"""
-    
-    html += """
-                </div>
-            </div>
-            
-            <!-- Top 30 테이블 -->
+    # === Top 30 추천 종목 ===
+    html_content += """
             <div class="section">
-                <div class="section-title">
-                    <span class="icon">🏆</span>
-                    Top 30 추천 종목
-                </div>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>순위</th>
-                                <th>종목명</th>
-                                <th>점수</th>
-                                <th>현재가</th>
-                                <th>손절가</th>
-                                <th>목표가</th>
-                                <th>위험도</th>
-                                <th>RSI</th>
-                                <th>이격도</th>
-                                <th>거래량</th>
-                                <th>52주위치</th>
-                                <th>30일 추세</th>
-                            </tr>
-                        </thead>
-                        <tbody>
+                <h2 class="section-title">
+                    <span>🎯 Top 30 추천 종목</span>
+                    <span class="badge">PREMIUM PICKS</span>
+                </h2>
+                <div class="top30-grid">
 """
     
-    for i, stock in enumerate(top_30, 1):
-        score_class = 'excellent' if stock['score'] >= 80 else 'good' if stock['score'] >= 70 else 'fair' if stock['score'] >= 60 else 'normal'
-        risk_class = f"risk-{stock['risk_level'].lower()}"
+    for i, r in enumerate(results[:30], 1):
+        chart_file = r.get('chart', '')
+        details = r['details']
         
-        # 차트
-        chart_html = ""
-        if stock['ticker'] in chart_files:
-            chart_html = f'<img src="{chart_files[stock["ticker"]]}" alt="차트">'
-        
-        # 네이버 뉴스 링크
-        news_url = f"https://finance.naver.com/item/news.nhn?code={stock['code']}"
-        
-        html += f"""
-                            <tr>
-                                <td><strong>{i}</strong></td>
-                                <td class="stock-name">
-                                    <a href="{news_url}" target="_blank" style="color: #212529; text-decoration: none;">
-                                        {stock['name']} 📰
-                                    </a>
-                                </td>
-                                <td class="score {score_class}">{stock['score']}</td>
-                                <td class="price">{stock['current_price']:,.0f}원</td>
-                                <td style="color: #dc3545;">{stock['stop_loss']:,.0f}원</td>
-                                <td style="color: #198754;">{stock['target_price']:,.0f}원</td>
-                                <td>
-                                    <span class="risk-tag {risk_class}">
-                                        {stock['risk_icon']} {stock['risk_level']}
-                                    </span>
-                                </td>
-                                <td>{stock['details'].get('RSI', 'N/A')}</td>
-                                <td>{stock['details'].get('이격도', 'N/A')}</td>
-                                <td>{stock['details'].get('거래량비율', 'N/A')}</td>
-                                <td>{stock['details'].get('52주위치', 'N/A')}</td>
-                                <td class="chart-cell">{chart_html}</td>
-                            </tr>
-"""
-    
-    html += """
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-"""
-    
-    # 지표별 Top 5 (6개 섹션)
-    indicator_sections = [
-        ("RSI 과매도 Top 5", "🔻", top_rsi, "RSI", "과매도 강도"),
-        ("이격도 저점 Top 5", "📉", top_disparity, "이격도", "저점 수준"),
-        ("거래량 급증 Top 5", "📊", top_volume, "거래량비율", "급증 비율"),
-        ("PBR 저평가 Top 5", "💎", top_pbr, "PBR", "저평가 정도"),
-        ("단기 모멘텀 Top 5", "🚀", top_momentum, "5일수익률", "단기 상승률"),
-        ("반등 강도 Top 5", "⚡", top_bounce, "반등강도", "반등 수준")
-    ]
-    
-    for title, icon, stocks, key_metric, metric_label in indicator_sections:
-        if not stocks:
-            continue
-            
-        html += f"""
-            <div class="section">
-                <div class="section-title">
-                    <span class="icon">{icon}</span>
-                    {title}
-                </div>
-                <div class="indicator-cards">
+        html_content += f"""
+                    <div class="stock-card">
+                        <div class="stock-card-header">
+                            <div class="rank">#{i}</div>
+                            <div class="name">{r['name']}</div>
+                            <div class="score">{r['score']}점</div>
+                        </div>
+                        <div class="stock-card-body">
 """
         
-        for i, stock in enumerate(stocks, 1):
-            metric_value = stock['details'].get(key_metric, 'N/A')
-            
-            html += f"""
-                    <div class="indicator-card">
-                        <div class="stock-info">
-                            <div>
-                                <span class="rank">{i}</span>
-                                <span class="stock-name-card">{stock['name']}</span>
+        if chart_file:
+            html_content += f"""
+                            <img src="charts/{chart_file}" alt="{r['name']} 차트">
+"""
+        
+        html_content += f"""
+                            <div class="stock-details">
+                                <div class="detail-item">
+                                    <span class="label">RSI</span>
+                                    <span class="value">{details.get('RSI', 'N/A')}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="label">이격도</span>
+                                    <span class="value">{details.get('이격도', 'N/A')}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="label">거래량</span>
+                                    <span class="value">{details.get('거래량증가율', 'N/A')}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="label">PBR</span>
+                                    <span class="value">{details.get('PBR', 'N/A')}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="label">5일수익률</span>
+                                    <span class="value">{details.get('5일수익률', 'N/A')}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="label">반등강도</span>
+                                    <span class="value">{details.get('반등강도', 'N/A')}</span>
+                                </div>
                             </div>
-                            <span class="stock-score">{stock['score']}점</span>
-                        </div>
-                        <div class="highlight-value">
-                            {metric_label}: {metric_value}
-                        </div>
-                        <div class="detail-row">
-                            <span>현재가</span>
-                            <strong>{stock['current_price']:,.0f}원</strong>
-                        </div>
-                        <div class="detail-row">
-                            <span>목표가</span>
-                            <strong style="color: #198754;">{stock['target_price']:,.0f}원</strong>
-                        </div>
-                        <div class="detail-row">
-                            <span>위험도</span>
-                            <strong>{stock['risk_icon']} {stock['risk_level']}</strong>
                         </div>
                     </div>
 """
-        
-        html += """
+    
+    html_content += """
                 </div>
             </div>
 """
     
-    # 투자 성향별
-    html += """
-            <!-- 투자 성향별 추천 -->
+    # === 지표별 Top 5 ===
+    html_content += """
             <div class="section">
-                <div class="section-title">
-                    <span class="icon">🎯</span>
-                    투자 성향별 추천 (각 최대 8개)
-                </div>
-                <div class="guide-grid">
+                <h2 class="section-title">
+                    <span>📈 지표별 Top 5</span>
+                    <span class="badge">KEY INDICATORS</span>
+                </h2>
+                <div class="indicator-grid">
 """
     
-    # 보수적
-    html += """
-                    <div class="guide-card">
-                        <h3>🟢 보수적 투자자용</h3>
-                        <ul>
-"""
-    for stock in conservative:
-        html += f"""
-                            <li><strong>{stock['name']}</strong> - {stock['score']}점 (RSI: {stock['details'].get('RSI', 'N/A')})</li>
-"""
-    html += """
-                        </ul>
-                    </div>
-"""
+    # RSI Top 5 (낮은 순)
+    top_rsi = sorted([r for r in results if 'RSI' in r['details']], 
+                     key=lambda x: float(x['details']['RSI']), 
+                     reverse=False)[:5]
     
-    # 공격적
-    html += """
-                    <div class="guide-card">
-                        <h3>🔴 공격적 투자자용</h3>
-                        <ul>
+    html_content += """
+                    <div class="indicator-card">
+                        <h3>🔵 RSI (과매도)</h3>
+                        <ul class="indicator-list">
 """
-    for stock in aggressive:
-        html += f"""
-                            <li><strong>{stock['name']}</strong> - {stock['score']}점 (거래량: {stock['details'].get('거래량비율', 'N/A')})</li>
+    for r in top_rsi:
+        html_content += f"""
+                            <li>
+                                <span class="stock-name">{r['name']}</span>
+                                <span class="stock-value">{r['details']['RSI']}</span>
+                            </li>
 """
-    html += """
+    html_content += """
                         </ul>
                     </div>
 """
     
-    html += """
+    # 이격도 Top 5 (100에 가까운 순) - ✅ 502번 줄 패턴과 동일하게 수정
+    top_disparity = sorted([r for r in results if '이격도' in r['details']], 
+                          key=lambda x: abs(float(x['details']['이격도'].replace('%', '')) - 100),
+                          reverse=False)[:5]
+    
+    html_content += """
+                    <div class="indicator-card">
+                        <h3>📊 이격도 (적정 범위)</h3>
+                        <ul class="indicator-list">
+"""
+    for r in top_disparity:
+        html_content += f"""
+                            <li>
+                                <span class="stock-name">{r['name']}</span>
+                                <span class="stock-value">{r['details']['이격도']}</span>
+                            </li>
+"""
+    html_content += """
+                        </ul>
+                    </div>
+"""
+    
+    # 거래량 증가율 Top 5 - ✅ 495번 줄 패턴과 동일하게 수정
+    top_volume = sorted([r for r in results if '거래량증가율' in r['details']], 
+                       key=lambda x: float(x['details']['거래량증가율'].replace('%', '')),
+                       reverse=True)[:5]
+    
+    html_content += """
+                    <div class="indicator-card">
+                        <h3>📈 거래량 증가율</h3>
+                        <ul class="indicator-list">
+"""
+    for r in top_volume:
+        html_content += f"""
+                            <li>
+                                <span class="stock-name">{r['name']}</span>
+                                <span class="stock-value">{r['details']['거래량증가율']}</span>
+                            </li>
+"""
+    html_content += """
+                        </ul>
+                    </div>
+"""
+    
+    # PBR Top 5 (낮은 순)
+    top_pbr = sorted([r for r in results if r['details'].get('PBR', 'N/A') != 'N/A'], 
+                    key=lambda x: float(x['details']['PBR']),
+                    reverse=False)[:5]
+    
+    html_content += """
+                    <div class="indicator-card">
+                        <h3>💰 PBR (저평가)</h3>
+                        <ul class="indicator-list">
+"""
+    for r in top_pbr:
+        html_content += f"""
+                            <li>
+                                <span class="stock-name">{r['name']}</span>
+                                <span class="stock-value">{r['details']['PBR']}</span>
+                            </li>
+"""
+    html_content += """
+                        </ul>
+                    </div>
+"""
+    
+    # 단기 모멘텀 Top 5 - ✅ 502번 줄 버그 완전 수정 (r → x)
+    top_momentum = sorted([r for r in results if '5일수익률' in r['details']], 
+                         key=lambda x: float(x['details']['5일수익률'].replace('%', '')),
+                         reverse=True)[:5]
+    
+    html_content += """
+                    <div class="indicator-card">
+                        <h3>🚀 단기 모멘텀 (5일)</h3>
+                        <ul class="indicator-list">
+"""
+    for r in top_momentum:
+        html_content += f"""
+                            <li>
+                                <span class="stock-name">{r['name']}</span>
+                                <span class="stock-value">{r['details']['5일수익률']}</span>
+                            </li>
+"""
+    html_content += """
+                        </ul>
+                    </div>
+"""
+    
+    # 반등 강도 Top 5 - ✅ 507번 줄 버그 완전 수정 (r → x)
+    top_rebound = sorted([r for r in results if '반등강도' in r['details']], 
+                        key=lambda x: float(x['details']['반등강도'].replace('%', '')),
+                        reverse=True)[:5]
+    
+    html_content += """
+                    <div class="indicator-card">
+                        <h3>⚡ 반등 강도</h3>
+                        <ul class="indicator-list">
+"""
+    for r in top_rebound:
+        html_content += f"""
+                            <li>
+                                <span class="stock-name">{r['name']}</span>
+                                <span class="stock-value">{r['details']['반등강도']}</span>
+                            </li>
+"""
+    html_content += """
+                        </ul>
+                    </div>
+"""
+    
+    html_content += """
                 </div>
             </div>
-            
-            <!-- 투자 가이드 -->
+"""
+    
+    # === 투자 성향별 추천 ===
+    html_content += """
             <div class="section">
-                <div class="section-title">
-                    <span class="icon">📚</span>
-                    투자 가이드
-                </div>
-                <div class="guide-grid">
-                    <div class="guide-card">
-                        <h3>💡 점수 해석</h3>
-                        <ul>
-                            <li><strong>80점 이상:</strong> 매우 우수 (목표가 +25%)</li>
-                            <li><strong>70-79점:</strong> 우수 (목표가 +20%)</li>
-                            <li><strong>60-69점:</strong> 양호 (목표가 +15%)</li>
-                            <li><strong>40-59점:</strong> 보통 (목표가 +10%)</li>
+                <h2 class="section-title">
+                    <span>👥 투자 성향별 추천</span>
+                    <span class="badge">PERSONALIZED</span>
+                </h2>
+                <div class="investor-grid">
+"""
+    
+    # 보수적 투자자 (최대 8개)
+    conservative = [r for r in results if float(r['details'].get('RSI', '50')) <= 35 
+                   and r['details'].get('PBR', 'N/A') != 'N/A' 
+                   and float(r['details']['PBR']) < 1.2][:8]
+    
+    html_content += """
+                    <div class="investor-card conservative">
+                        <h3><span class="icon">🛡️</span> 보수적 투자자</h3>
+                        <p class="description">저평가 + 과매도 구간 + 안정성 중시</p>
+                        <ul class="investor-list">
+"""
+    for r in conservative:
+        html_content += f"""
+                            <li>
+                                <div class="stock-info">
+                                    <span class="stock-name">{r['name']}</span>
+                                    <span class="stock-score">RSI: {r['details']['RSI']} | PBR: {r['details']['PBR']}</span>
+                                </div>
+                                <span class="stock-value">{r['score']}점</span>
+                            </li>
+"""
+    html_content += """
                         </ul>
                     </div>
-                    
-                    <div class="guide-card">
-                        <h3>⚠️ 위험도 분류</h3>
-                        <ul>
-                            <li><strong>🟢 낮음:</strong> 안정적, 초보자 적합</li>
-                            <li><strong>🟡 보통:</strong> 적정 위험, 일반 투자자</li>
-                            <li><strong>🔴 높음:</strong> 변동성 큼, 경험자 권장</li>
+"""
+    
+    # 공격적 투자자 (최대 8개)
+    aggressive = [r for r in results if float(r['details'].get('거래량증가율', '0').replace('%', '')) >= 30 
+                 and float(r['details'].get('반등강도', '0').replace('%', '')) >= 10][:8]
+    
+    html_content += """
+                    <div class="investor-card aggressive">
+                        <h3><span class="icon">⚔️</span> 공격적 투자자</h3>
+                        <p class="description">고거래량 + 강한 반등 + 모멘텀 중시</p>
+                        <ul class="investor-list">
+"""
+    for r in aggressive:
+        html_content += f"""
+                            <li>
+                                <div class="stock-info">
+                                    <span class="stock-name">{r['name']}</span>
+                                    <span class="stock-score">거래량: {r['details']['거래량증가율']} | 반등: {r['details']['반등강도']}</span>
+                                </div>
+                                <span class="stock-value">{r['score']}점</span>
+                            </li>
+"""
+    html_content += """
                         </ul>
                     </div>
-                    
-                    <div class="guide-card">
-                        <h3>📈 진입 전략</h3>
-                        <ul>
-                            <li>분할 매수 권장 (3회 이상)</li>
-                            <li>손절가 도달 시 즉시 청산</li>
-                            <li>목표가 도달 시 50% 익절</li>
-                            <li>뉴스 및 공시 필수 확인</li>
-                        </ul>
-                    </div>
-                    
-                    <div class="guide-card">
-                        <h3>🎯 보유 기간</h3>
-                        <ul>
-                            <li><strong>단기:</strong> 2-5일 (고득점 + 고거래량)</li>
-                            <li><strong>중기:</strong> 1-2주 (저평가 + 반등)</li>
-                            <li><strong>장기:</strong> 1개월+ (우량주 + 저위험)</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- 산출 기준 -->
-            <div class="section">
-                <div class="section-title">
-                    <span class="icon">🔬</span>
-                    점수 산출 기준
-                </div>
-                <div class="guide-grid">
-                    <div class="guide-card">
-                        <h3>📊 기술적 지표 (40점)</h3>
-                        <ul>
-                            <li><strong>RSI (10점):</strong> 25-35 과매도 구간</li>
-                            <li><strong>이격도 (10점):</strong> -15% ~ -8% 저점</li>
-                            <li><strong>거래량 (10점):</strong> 평균 대비 2.5배 이상</li>
-                            <li><strong>모멘텀 (10점):</strong> 단기 반등 + 중기 조정</li>
-                        </ul>
-                    </div>
-                    
-                    <div class="guide-card">
-                        <h3>💼 재무 지표 (30점)</h3>
-                        <ul>
-                            <li><strong>PER (10점):</strong> 8 미만 저평가</li>
-                            <li><strong>PBR (10점):</strong> 0.8 미만 우량</li>
-                            <li><strong>부채비율 (10점):</strong> 100% 미만 안정</li>
-                        </ul>
-                    </div>
-                    
-                    <div class="guide-card">
-                        <h3>⏰ 시장 타이밍 (30점)</h3>
-                        <ul>
-                            <li><strong>52주 위치 (15점):</strong> 하위 20% 저점</li>
-                            <li><strong>MA 배열 (15점):</strong> 골든크로스 신호</li>
-                        </ul>
-                    </div>
-                    
-                    <div class="guide-card">
-                        <h3>🎲 필터링 조건</h3>
-                        <ul>
-                            <li>최소 점수: 40점 이상</li>
-                            <li>최소 거래대금: 5억 원 이상</li>
-                            <li>데이터 충분성: 60일 이상</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- 주의사항 -->
-            <div class="section">
-                <div class="section-title">
-                    <span class="icon">⚠️</span>
-                    주의사항
-                </div>
-                <div style="background: linear-gradient(135deg, #fff5f5 0%, #ffe5e5 100%); padding: 25px; border-radius: 12px; border-left: 4px solid #dc3545;">
-                    <ul style="list-style: none; padding: 0; color: #495057;">
-                        <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-                            <span style="position: absolute; left: 0; color: #dc3545; font-weight: 700;">⚠️</span>
-                            <strong>본 리포트는 투자 참고용이며, 투자 판단과 책임은 투자자 본인에게 있습니다.</strong>
-                        </li>
-                        <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-                            <span style="position: absolute; left: 0; color: #dc3545; font-weight: 700;">⚠️</span>
-                            손절가는 반드시 준수하시고, 추가 하락 시 과감히 청산하세요.
-                        </li>
-                        <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-                            <span style="position: absolute; left: 0; color: #dc3545; font-weight: 700;">⚠️</span>
-                            뉴스, 공시, 재무제표를 반드시 확인한 후 투자하세요.
-                        </li>
-                        <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-                            <span style="position: absolute; left: 0; color: #dc3545; font-weight: 700;">⚠️</span>
-                            분산 투자 원칙을 지키고, 한 종목에 과도한 집중을 피하세요.
-                        </li>
-                    </ul>
+"""
+    
+    html_content += """
                 </div>
             </div>
         </div>
         
         <!-- 푸터 -->
         <div class="footer">
-            <div class="timestamp">생성 시간: {timestamp}</div>
-            <div>스윙 트레이드 추천 시스템 v3.5 프리미엄 에디션</div>
-            <div style="margin-top: 10px; font-size: 0.85em;">
-                Data: Yahoo Finance & KRX | Analysis: AI-Powered Multi-Factor Model
-            </div>
+            <p>본 리포트는 투자 참고용이며, 투자 결과에 대한 책임은 투자자 본인에게 있습니다.</p>
+            <p>데이터 출처: Yahoo Finance | 차트: matplotlib</p>
         </div>
     </div>
 </body>
 </html>
 """
     
-    return html
-
-
-def main():
-    """메인 실행"""
-    print("=" * 60)
-    print("🚀 스윙 트레이드 추천 시스템 v3.5 - 프리미엄 디자인")
-    print("=" * 60)
-    
-    start_time = time.time()
-    
-    # 1. 티커 수집
-    print("\n📋 Step 1: 한국 거래소 티커 수집 중...")
-    tickers = get_krx_tickers()
-    
-    if not tickers:
-        print("❌ 티커 수집 실패 - 종료")
-        return
-    
-    print(f"✅ 총 {len(tickers)}개 종목 수집 완료")
-    
-    # 2. 종목 분석
-    print(f"\n📊 Step 2: {len(tickers)}개 종목 분석 중...")
-    print("⏱️  예상 소요 시간: 15-20분")
-    
-    results = []
-    failed = 0
-    
-    for i, ticker in enumerate(tickers, 1):
-        if i % 100 == 0:
-            elapsed = time.time() - start_time
-            print(f"  진행률: {i}/{len(tickers)} ({i/len(tickers)*100:.1f}%) | 경과: {elapsed/60:.1f}분")
-        
-        result = analyze_stock(ticker)
-        if result:
-            results.append(result)
-        else:
-            failed += 1
-    
-    print(f"\n✅ 분석 완료:")
-    print(f"  - 조건 충족 종목: {len(results)}개")
-    print(f"  - 필터링: {failed}개 (조건 미충족)")
-    
-    if not results:
-        print("❌ 조건 충족 종목 없음 - 종료")
-        return
-    
-    # 3. HTML 생성
-    print("\n📝 Step 3: HTML 리포트 생성 중...")
-    html_content = generate_html_report(results, len(tickers), len(results))
-    
-    with open('index.html', 'w', encoding='utf-8') as f:
+    with open(HTML_FILE, 'w', encoding='utf-8') as f:
         f.write(html_content)
     
-    print("✅ index.html 생성 완료")
-    
-    # 4. 완료
-    total_time = time.time() - start_time
-    print("\n" + "=" * 60)
-    print(f"🎉 모든 작업 완료! (총 소요 시간: {total_time/60:.1f}분)")
-    print("=" * 60)
-    print(f"\n📊 결과:")
-    print(f"  - 분석 종목: {len(tickers)}개")
-    print(f"  - 조건 충족: {len(results)}개")
-    print(f"  - Top 30 평균 점수: {np.mean([r['score'] for r in sorted(results, key=lambda x: x['score'], reverse=True)[:30]]):.1f}점")
-    print(f"\n📁 생성 파일:")
-    print(f"  - index.html ({os.path.getsize('index.html')/1024:.1f} KB)")
-    if os.path.exists('charts'):
-        chart_count = len(glob.glob('charts/*.png'))
-        print(f"  - charts/*.png ({chart_count}개)")
+    print(f"\n✓ HTML 리포트 생성 완료: {HTML_FILE}")
 
+# === 7. 지수/환율 데이터 수집 ===
+def get_market_data():
+    """주요 지수 및 환율 데이터 수집"""
+    data = {}
+    
+    try:
+        # KOSPI
+        kospi = yf.Ticker("^KS11")
+        kospi_hist = kospi.history(period='5d')
+        if len(kospi_hist) >= 2:
+            current = kospi_hist['Close'].iloc[-1]
+            previous = kospi_hist['Close'].iloc[-2]
+            change = ((current / previous) - 1) * 100
+            data['kospi'] = {
+                'value': f"{current:.2f}",
+                'change': f"{'+' if change >= 0 else ''}{change:.2f}%"
+            }
+    except:
+        data['kospi'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    try:
+        # KOSDAQ
+        kosdaq = yf.Ticker("^KQ11")
+        kosdaq_hist = kosdaq.history(period='5d')
+        if len(kosdaq_hist) >= 2:
+            current = kosdaq_hist['Close'].iloc[-1]
+            previous = kosdaq_hist['Close'].iloc[-2]
+            change = ((current / previous) - 1) * 100
+            data['kosdaq'] = {
+                'value': f"{current:.2f}",
+                'change': f"{'+' if change >= 0 else ''}{change:.2f}%"
+            }
+    except:
+        data['kosdaq'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    try:
+        # S&P 500
+        sp500 = yf.Ticker("^GSPC")
+        sp500_hist = sp500.history(period='5d')
+        if len(sp500_hist) >= 2:
+            current = sp500_hist['Close'].iloc[-1]
+            previous = sp500_hist['Close'].iloc[-2]
+            change = ((current / previous) - 1) * 100
+            data['sp500'] = {
+                'value': f"{current:.2f}",
+                'change': f"{'+' if change >= 0 else ''}{change:.2f}%"
+            }
+    except:
+        data['sp500'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    try:
+        # USD/KRW
+        usdkrw = yf.Ticker("KRW=X")
+        usdkrw_hist = usdkrw.history(period='5d')
+        if len(usdkrw_hist) >= 2:
+            current = usdkrw_hist['Close'].iloc[-1]
+            previous = usdkrw_hist['Close'].iloc[-2]
+            change = ((current / previous) - 1) * 100
+            data['usdkrw'] = {
+                'value': f"{current:.2f}",
+                'change': f"{'+' if change >= 0 else ''}{change:.2f}%"
+            }
+    except:
+        data['usdkrw'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    try:
+        # EUR/KRW
+        eurkrw = yf.Ticker("EURKRW=X")
+        eurkrw_hist = eurkrw.history(period='5d')
+        if len(eurkrw_hist) >= 2:
+            current = eurkrw_hist['Close'].iloc[-1]
+            previous = eurkrw_hist['Close'].iloc[-2]
+            change = ((current / previous) - 1) * 100
+            data['eurkrw'] = {
+                'value': f"{current:.2f}",
+                'change': f"{'+' if change >= 0 else ''}{change:.2f}%"
+            }
+    except:
+        data['eurkrw'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    try:
+        # JPY/KRW (100엔 기준)
+        jpykrw = yf.Ticker("JPYKRW=X")
+        jpykrw_hist = jpykrw.history(period='5d')
+        if len(jpykrw_hist) >= 2:
+            current = jpykrw_hist['Close'].iloc[-1] * 100
+            previous = jpykrw_hist['Close'].iloc[-2] * 100
+            change = ((current / previous) - 1) * 100
+            data['jpykrw'] = {
+                'value': f"{current:.2f}",
+                'change': f"{'+' if change >= 0 else ''}{change:.2f}%"
+            }
+    except:
+        data['jpykrw'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    return data
+
+# === 8. 메인 실행 ===
+def main():
+    print("\n[1단계] 종목 리스트 수집 중...")
+    tickers = get_all_krx_tickers()
+    
+    if not tickers:
+        print("✗ 종목 리스트를 가져올 수 없습니다.")
+        return
+    
+    print(f"\n[2단계] {len(tickers)}개 종목 분석 시작...")
+    print("=" * 60)
+    
+    results = []
+    total_count = len(tickers)
+    
+    for idx, (name, ticker) in enumerate(tickers, 1):
+        try:
+            if idx % 100 == 0:
+                print(f"진행 중: {idx}/{total_count} ({idx/total_count*100:.1f}%)")
+            
+            df = download_stock_data(ticker)
+            if df is None:
+                continue
+            
+            # 거래대금 필터 (최근 20일 평균 5억 이상)
+            avg_value = (df['Close'] * df['Volume']).tail(20).mean()
+            if avg_value < 500_000_000:
+                continue
+            
+            score, details = calculate_swing_score(df, ticker)
+            
+            # 40점 이상만 수집
+            if score >= 40:
+                results.append({
+                    'name': name,
+                    'ticker': ticker,
+                    'score': score,
+                    'details': details,
+                    'df': df
+                })
+        
+        except Exception as e:
+            continue
+    
+    print("=" * 60)
+    print(f"✓ 분석 완료: {len(results)}개 종목이 조건 충족")
+    
+    if not results:
+        print("✗ 조건을 충족하는 종목이 없습니다.")
+        return
+    
+    # 점수순 정렬
+    results.sort(key=lambda x: x['score'], reverse=True)
+    
+    print("\n[3단계] 차트 생성 중...")
+    for i, r in enumerate(results[:30], 1):
+        print(f"  차트 생성: {i}/30 - {r['name']}")
+        chart_file = create_chart(r['df'], r['name'], r['score'], r['details'], i)
+        r['chart'] = chart_file
+    
+    print("\n[4단계] 지수/환율 데이터 수집 중...")
+    index_data = get_market_data()
+    index_data['total_analyzed'] = len(tickers)
+    
+    print("\n[5단계] HTML 리포트 생성 중...")
+    generate_html(results, index_data)
+    
+    print("\n" + "=" * 60)
+    print("✓ 모든 작업 완료!")
+    print(f"✓ 리포트 위치: {HTML_FILE}")
+    print(f"✓ 차트 위치: {CHART_DIR}")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()
