@@ -1083,7 +1083,7 @@ def generate_html_report(results, total_analyzed, total_success):
                     </div>
                     <div class="stat-card">
                         <div class="value">{total_success:,}</div>
-                        <div class="label">분석 성공<br><small>(40점 이상 + 거래대금 5억 이상)</small></div>
+                        <div class="label">조건 충족 종목<br><small>(40점 이상 + 거래대금 5억 이상)</small></div>
                     </div>
                     <div class="stat-card">
                         <div class="value">30</div>
@@ -1484,7 +1484,7 @@ def main():
             failed += 1
     
     print(f"\n✅ 분석 완료:")
-    print(f"  - 분석 성공: {len(results)}개")
+    print(f"  - 조건 충족 종목: {len(results)}개")
     print(f"  - 필터링: {failed}개 (조건 미충족)")
     
     if not results:
