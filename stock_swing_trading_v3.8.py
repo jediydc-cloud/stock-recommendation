@@ -121,8 +121,9 @@ def get_all_kr_tickers():
         kospi_df = pd.read_html(kospi_url, encoding='cp949')[0]
         kosdaq_df = pd.read_html(kosdaq_url, encoding='cp949')[0]
         
-        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: f"{str(x).zfill(6)}.KS")
-        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: f"{str(x).zfill(6)}.KQ")
+        # 종목코드 포맷: int 변환 후 6자리 패딩
+        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: f"{int(float(str(x).strip())):06d}.KS")
+        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: f"{int(float(str(x).strip())):06d}.KQ")
         
         kospi_df['market'] = 'KOSPI'
         kosdaq_df['market'] = 'KOSDAQ'
@@ -688,11 +689,11 @@ def generate_html(df, market_data, gemini_analysis, output_path):
     print("📄 HTML 보고서 생성 중...")
     print("=" * 70)
     
-    # 40점 이상 필터링
-    df_filtered = df[df['score'] >= 40].copy()
+    # 30점 이상 필터링 (완화)
+    df_filtered = df[df['score'] >= 30].copy()
     df_filtered = df_filtered.sort_values('score', ascending=False).reset_index(drop=True)
     
-    print(f"40점 이상 종목: {len(df_filtered)}개")
+    print(f"30점 이상 종목: {len(df_filtered)}개")
     
     # Top 30
     top_30 = df_filtered.head(30).copy()
@@ -1528,8 +1529,8 @@ def main():
         print("✗ 종목 수집 실패. 프로그램을 종료합니다.")
         return
     
-    # 2. 전체 종목 분석
-    df = analyze_all_stocks(all_tickers, min_volume=500_000_000)
+    # 2. 전체 종목 분석 (거래대금 1억으로 완화)
+    df = analyze_all_stocks(all_tickers, min_volume=100_000_000)
     if df.empty:
         print("✗ 분석 결과가 없습니다. 프로그램을 종료합니다.")
         return
