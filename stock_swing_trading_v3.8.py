@@ -121,9 +121,26 @@ def get_all_kr_tickers():
         kospi_df = pd.read_html(kospi_url, encoding='cp949')[0]
         kosdaq_df = pd.read_html(kosdaq_url, encoding='cp949')[0]
         
-        # 종목코드 포맷: int 변환 후 6자리 패딩
-        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: f"{int(float(str(x).strip())):06d}.KS")
-        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: f"{int(float(str(x).strip())):06d}.KQ")
+        # 종목코드 포맷: 안전하게 변환 (특수 종목 스킵)
+        def safe_ticker_format(x, suffix):
+            try:
+                # 숫자만 추출 시도
+                code_str = str(x).strip()
+                # 숫자만 포함된 경우
+                if code_str.isdigit():
+                    return f"{int(code_str):06d}.{suffix}"
+                # 숫자로 변환 가능한 경우 (float 포함)
+                return f"{int(float(code_str)):06d}.{suffix}"
+            except:
+                # 변환 실패 시 None 반환 (나중에 필터링됨)
+                return None
+        
+        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: safe_ticker_format(x, 'KS'))
+        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: safe_ticker_format(x, 'KQ'))
+        
+        # None 제거 (특수 종목 필터링)
+        kospi_df = kospi_df[kospi_df['ticker'].notna()]
+        kosdaq_df = kosdaq_df[kosdaq_df['ticker'].notna()]
         
         kospi_df['market'] = 'KOSPI'
         kosdaq_df['market'] = 'KOSDAQ'
