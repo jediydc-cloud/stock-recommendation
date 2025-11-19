@@ -62,21 +62,35 @@ import urllib.parse
 # Google Gemini API 설정
 import google.generativeai as genai
 
-# 환경변수에서 API 키 읽기
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# API 키 읽기 (Colab Secrets 우선, 환경변수 폴백)
+GEMINI_API_KEY = None
 
+# 1순위: Colab Secrets 시도
+try:
+    from google.colab import userdata
+    # swingTrading 이름으로 통합 관리 (Colab + GitHub 동일)
+    GEMINI_API_KEY = userdata.get('swingTrading')
+    print("=" * 70)
+    print("✓ Colab Secrets에서 API 키 로드 완료 (swingTrading)")
+    print("=" * 70)
+except:
+    # 2순위: 환경변수 시도 (GitHub Actions용 - 동일한 이름)
+    GEMINI_API_KEY = os.environ.get("swingTrading")
+    if GEMINI_API_KEY:
+        print("=" * 70)
+        print("✓ 환경변수에서 API 키 로드 완료 (swingTrading)")
+        print("=" * 70)
+
+# API 키 확인 및 설정
 if not GEMINI_API_KEY:
     print("=" * 70)
-    print("✗ GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
+    print("✗ API 키를 찾을 수 없습니다.")
     print("=" * 70)
     print("\n[해결 방법]")
-    print("- Colab: 왼쪽 사이드바 Variables에서 GEMINI_API_KEY 추가")
+    print("- Colab: 왼쪽 사이드바 🔑 Secrets에서 'swingTrading' 이름으로 추가")
     print("- GitHub: Settings → Secrets → Actions → GEMINI_API_KEY 추가")
     print("\n⚠️ AI 종합 분석은 스킵되며, 나머지 기능은 정상 작동합니다.\n")
 else:
-    print("=" * 70)
-    print("✓ GEMINI_API_KEY 환경변수 확인 완료")
-    print("=" * 70)
     genai.configure(api_key=GEMINI_API_KEY)
 
 # ============================================================================
