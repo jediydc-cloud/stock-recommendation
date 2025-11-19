@@ -54,7 +54,7 @@ def setup_environment():
         print(f"⚠ Colab Secrets 로드 실패: {e}")
     
     # GitHub/로컬 환경 체크
-    api_key = os.environ.get('SWING_TRADING_API_KEY')
+    api_key = os.environ.get('swingTrading')
     if api_key:
         genai.configure(api_key=api_key)
         print("✓ GitHub Secrets에서 API 키 로드 완료")
@@ -64,7 +64,7 @@ def setup_environment():
     raise ValueError(
         "❌ API 키를 찾을 수 없습니다!\n"
         "Colab: 좌측 🔑 아이콘에서 'swingTrading' 설정\n"
-        "GitHub: Settings → Secrets → 'SWING_TRADING_API_KEY' 설정"
+        "GitHub: Settings → Secrets → 'swingTrading' 설정"
     )
 
 def setup_korean_font():
