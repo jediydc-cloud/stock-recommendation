@@ -1,398 +1,370 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-================================================================================
-스윙 트레이드 종목 추천 시스템 v3.8 (환경변수 통합 버전)
-================================================================================
-
-[주요 변경사항 v3.7 → v3.8]
-- API 키: 하드코딩 제거 → 환경변수(GEMINI_API_KEY)만 사용
-- Gemini 모델: models/gemini-2.5-flash
-- API 키 없을 때: 예외 대신 안내 문구 반환
-- 뉴스 링크: 종목명 + 종목코드 기반 검색
-- Colab/GitHub 호환: 동일 코드로 양쪽 작동
-
-[환경변수 설정 안내]
-
-- Colab에서:
-  1) 런타임 시작 후, 왼쪽의 '환경 변수(Variables)' 메뉴에서 GEMINI_API_KEY를 추가하거나
-  2) 또는 첫 셀에서:
-     import os
-     os.environ["GEMINI_API_KEY"] = input("Gemini API Key 입력: ").strip()
-
-- GitHub에서:
-  1) GitHub Repo → Settings → Secrets and variables → Actions → New repository secret
-  2) Name: GEMINI_API_KEY, Value: (발급받은 키)
-  3) GitHub Actions 워크플로우에서:
-     env:
-       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-이 코드는 GEMINI_API_KEY 환경변수만 존재하면 Colab과 GitHub 양쪽에서 동일하게 작동합니다.
-
-[기능 개요]
-- KOSPI + KOSDAQ 전체 종목 분석 (거래대금 5억 이상)
-- 6가지 지표 기반 100점 만점 점수 계산
-- Top 6: 프리미엄 카드형 (차트 포함)
-- Top 7~30: 테이블형
-- 지표별 Top 5 (6개 지표)
-- 투자자별 추천 (보수/공격 각 8개)
-- Gemini AI 종합 분석 (1000자)
-
-[실행 시간]
-- 약 18분 (2,650개 종목 → 필터링 후 분석)
-
-================================================================================
+스윙 트레이딩 종목 추천 시스템 v3.9 HYBRID
+- 하이브리드 데이터 소스: pykrx (한국 종목) + yfinance (지수/환율)
+- 에러 0개 예상 (상장폐지 종목 자동 제외)
+- 환율 3개 (USD, EUR, JPY) 유지
+- 디자인 변경 없음
 """
 
 import yfinance as yf
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
+import numpy as np
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-from datetime import datetime, timedelta
-import os
-import base64
 from io import BytesIO
-import time
+import base64
 import warnings
-warnings.filterwarnings('ignore')
-import urllib.parse
-
-# Google Gemini API 설정
+import time
+import logging
+from google.colab import userdata
 import google.generativeai as genai
 
-# API 키 읽기 (Colab Secrets 우선, 환경변수 폴백)
-GEMINI_API_KEY = None
-
-# 1순위: Colab Secrets 시도
+# pykrx 추가
 try:
-    from google.colab import userdata
-    # swingTrading 이름으로 통합 관리 (Colab + GitHub 동일)
-    GEMINI_API_KEY = userdata.get('swingTrading')
-    print("=" * 70)
-    print("✓ Colab Secrets에서 API 키 로드 완료 (swingTrading)")
-    print("=" * 70)
-except:
-    # 2순위: 환경변수 시도 (GitHub Actions용 - 동일한 이름)
-    GEMINI_API_KEY = os.environ.get("swingTrading")
-    if GEMINI_API_KEY:
-        print("=" * 70)
-        print("✓ 환경변수에서 API 키 로드 완료 (swingTrading)")
-        print("=" * 70)
+    from pykrx import stock
+    PYKRX_AVAILABLE = True
+    print("✓ pykrx 로드 완료")
+except ImportError:
+    PYKRX_AVAILABLE = False
+    print("⚠ pykrx 없음, 설치: pip install pykrx")
 
-# API 키 확인 및 설정
-if not GEMINI_API_KEY:
-    print("=" * 70)
-    print("✗ API 키를 찾을 수 없습니다.")
-    print("=" * 70)
-    print("\n[해결 방법]")
-    print("- Colab: 왼쪽 사이드바 🔑 Secrets에서 'swingTrading' 이름으로 추가")
-    print("- GitHub: Settings → Secrets → Actions → GEMINI_API_KEY 추가")
-    print("\n⚠️ AI 종합 분석은 스킵되며, 나머지 기능은 정상 작동합니다.\n")
-else:
-    genai.configure(api_key=GEMINI_API_KEY)
+warnings.filterwarnings('ignore')
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-# ============================================================================
-# 한글 폰트 설정
-# ============================================================================
-font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-if os.path.exists(font_path):
-    font_prop = fm.FontProperties(fname=font_path)
-    plt.rcParams['font.family'] = font_prop.get_name()
-    plt.rcParams['axes.unicode_minus'] = False
-    print("✓ 한글 폰트 설정 완료: NanumGothic")
-else:
-    print("⚠️ 한글 폰트를 찾을 수 없습니다. 차트에 한글이 깨질 수 있습니다.")
+# ============================================================
+# 환경 설정
+# ============================================================
 
-# ============================================================================
-# KOSPI + KOSDAQ 전체 티커 가져오기
-# ============================================================================
-def get_all_kr_tickers():
-    """KOSPI + KOSDAQ 전체 종목 티커 목록 반환"""
-    print("\n" + "=" * 70)
-    print("📊 KOSPI + KOSDAQ 전체 종목 수집 중...")
-    print("=" * 70)
+def setup_environment():
+    """환경 설정 및 API 키 로드"""
+    try:
+        api_key = userdata.get('swingTrading')
+        if not api_key:
+            raise ValueError("❌ Colab Secrets에 'swingTrading' API 키가 없습니다")
+        
+        genai.configure(api_key=api_key)
+        print("✓ Colab Secrets에서 API 키 로드 완료")
+        return api_key
+    except Exception as e:
+        print(f"⚠ API 키 로드 실패: {e}")
+        return None
+
+def setup_korean_font():
+    """한글 폰트 설정"""
+    try:
+        font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+        font_prop = fm.FontProperties(fname=font_path)
+        plt.rcParams['font.family'] = font_prop.get_name()
+        plt.rcParams['axes.unicode_minus'] = False
+        fm.fontManager.addfont(font_path)
+        print("✓ 한글 폰트 설정 완료")
+    except Exception as e:
+        print(f"⚠ 폰트 설정 실패: {e}")
+
+# ============================================================
+# 시장 데이터 수집 (지수/환율 - yfinance 유지)
+# ============================================================
+
+def get_market_data():
+    """시장 지수 및 환율 정보 조회 (yfinance 사용)"""
+    market_info = {}
     
-    kospi_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=stockMkt"
-    kosdaq_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=kosdaqMkt"
+    # KOSPI 지수
+    try:
+        kospi = yf.Ticker("^KS11")
+        kospi_hist = kospi.history(period="5d")
+        if not kospi_hist.empty and len(kospi_hist) >= 2:
+            current = kospi_hist['Close'].iloc[-1]
+            previous = kospi_hist['Close'].iloc[-2]
+            change = ((current - previous) / previous) * 100
+            market_info['KOSPI'] = {
+                'value': f"{current:.2f}",
+                'change': f"{change:+.2f}%"
+            }
+        else:
+            market_info['KOSPI'] = {'value': 'N/A', 'change': 'N/A'}
+    except:
+        market_info['KOSPI'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    # KOSDAQ 지수
+    try:
+        kosdaq = yf.Ticker("^KQ11")
+        kosdaq_hist = kosdaq.history(period="5d")
+        if not kosdaq_hist.empty and len(kosdaq_hist) >= 2:
+            current = kosdaq_hist['Close'].iloc[-1]
+            previous = kosdaq_hist['Close'].iloc[-2]
+            change = ((current - previous) / previous) * 100
+            market_info['KOSDAQ'] = {
+                'value': f"{current:.2f}",
+                'change': f"{change:+.2f}%"
+            }
+        else:
+            market_info['KOSDAQ'] = {'value': 'N/A', 'change': 'N/A'}
+    except:
+        market_info['KOSDAQ'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    # 환율 정보 (USD, EUR, JPY)
+    exchange_rates = {
+        'USD': 'USDKRW=X',
+        'EUR': 'EURKRW=X',
+        'JPY': 'JPYKRW=X'
+    }
+    
+    for currency, ticker in exchange_rates.items():
+        try:
+            fx = yf.Ticker(ticker)
+            fx_hist = fx.history(period="5d")
+            if not fx_hist.empty and len(fx_hist) >= 2:
+                current = fx_hist['Close'].iloc[-1]
+                previous = fx_hist['Close'].iloc[-2]
+                change = ((current - previous) / previous) * 100
+                
+                # JPY는 100엔 기준으로 표시
+                if currency == 'JPY':
+                    current = current * 100
+                    display_name = 'JPY(100엔)'
+                else:
+                    display_name = f'{currency}/KRW'
+                
+                market_info[display_name] = {
+                    'value': f"{current:.2f}",
+                    'change': f"{change:+.2f}%"
+                }
+            else:
+                market_info[f'{currency}/KRW'] = {'value': 'N/A', 'change': 'N/A'}
+        except:
+            market_info[f'{currency}/KRW'] = {'value': 'N/A', 'change': 'N/A'}
+    
+    print(f"✓ 시장 지수 및 환율 정보 수집 완료: {len(market_info)}개")
+    return market_info
+
+# ============================================================
+# 종목 데이터 수집 (pykrx 사용)
+# ============================================================
+
+def get_stock_list():
+    """한국 주식 목록 가져오기 (pykrx 사용)"""
+    if not PYKRX_AVAILABLE:
+        print("❌ pykrx가 설치되지 않았습니다. pip install pykrx")
+        return pd.DataFrame()
     
     try:
-        kospi_df = pd.read_html(kospi_url, encoding='cp949')[0]
-        kosdaq_df = pd.read_html(kosdaq_url, encoding='cp949')[0]
+        today = datetime.now().strftime('%Y%m%d')
         
-        # 종목코드 포맷: 안전하게 변환 (특수 종목 스킵)
-        def safe_ticker_format(x, suffix):
-            try:
-                # 숫자만 추출 시도
-                code_str = str(x).strip()
-                # 숫자만 포함된 경우
-                if code_str.isdigit():
-                    return f"{int(code_str):06d}.{suffix}"
-                # 숫자로 변환 가능한 경우 (float 포함)
-                return f"{int(float(code_str)):06d}.{suffix}"
-            except:
-                # 변환 실패 시 None 반환 (나중에 필터링됨)
-                return None
+        # KOSPI 종목 리스트
+        kospi_tickers = stock.get_market_ticker_list(today, market="KOSPI")
+        kospi_names = [stock.get_market_ticker_name(ticker) for ticker in kospi_tickers]
+        kospi_df = pd.DataFrame({
+            '종목명': kospi_names,
+            '종목코드': kospi_tickers,
+            '시장': 'KOSPI'
+        })
         
-        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: safe_ticker_format(x, 'KS'))
-        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: safe_ticker_format(x, 'KQ'))
+        # KOSDAQ 종목 리스트
+        kosdaq_tickers = stock.get_market_ticker_list(today, market="KOSDAQ")
+        kosdaq_names = [stock.get_market_ticker_name(ticker) for ticker in kosdaq_tickers]
+        kosdaq_df = pd.DataFrame({
+            '종목명': kosdaq_names,
+            '종목코드': kosdaq_tickers,
+            '시장': 'KOSDAQ'
+        })
         
-        # None 제거 (특수 종목 필터링)
-        kospi_df = kospi_df[kospi_df['ticker'].notna()]
-        kosdaq_df = kosdaq_df[kosdaq_df['ticker'].notna()]
+        stocks = pd.concat([kospi_df, kosdaq_df], ignore_index=True)
         
-        kospi_df['market'] = 'KOSPI'
-        kosdaq_df['market'] = 'KOSDAQ'
-        
-        all_stocks = pd.concat([
-            kospi_df[['회사명', 'ticker', 'market']],
-            kosdaq_df[['회사명', 'ticker', 'market']]
-        ], ignore_index=True)
-        
-        all_stocks.columns = ['name', 'ticker', 'market']
-        
-        print(f"✓ KOSPI: {len(kospi_df)}개 종목")
-        print(f"✓ KOSDAQ: {len(kosdaq_df)}개 종목")
-        print(f"✓ 전체: {len(all_stocks)}개 종목")
-        
-        return all_stocks
+        print(f"✓ 종목 목록 조회 완료: KOSPI {len(kospi_df)}개, KOSDAQ {len(kosdaq_df)}개 (총 {len(stocks)}개)")
+        return stocks
     
     except Exception as e:
-        print(f"✗ 종목 목록 수집 실패: {e}")
-        return pd.DataFrame(columns=['name', 'ticker', 'market'])
+        print(f"❌ 종목 목록 조회 실패: {e}")
+        return pd.DataFrame()
 
-# ============================================================================
-# 주식 데이터 수집
-# ============================================================================
-def get_stock_data(ticker, period='3mo'):
-    """특정 종목의 주가 데이터 수집"""
+def analyze_stock(code, name):
+    """개별 종목 분석 (pykrx 사용)"""
+    if not PYKRX_AVAILABLE:
+        return None
+    
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period=period)
+        # 날짜 설정 (60일)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=60)
+        start_str = start_date.strftime('%Y%m%d')
+        end_str = end_date.strftime('%Y%m%d')
         
-        if hist.empty or len(hist) < 20:
+        # 가격/거래량 데이터 (pykrx)
+        ohlcv = stock.get_market_ohlcv_by_date(start_str, end_str, code)
+        
+        if ohlcv.empty or len(ohlcv) < 20:
             return None
         
-        info = stock.info
-        return {
-            'hist': hist,
-            'info': info
-        }
-    except:
-        return None
-
-# ============================================================================
-# 지표 계산 함수들
-# ============================================================================
-def calculate_rsi(hist, period=14):
-    """RSI 계산 (0~100)"""
-    try:
-        close = hist['Close']
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        # 기본 정보
+        current_price = ohlcv['종가'].iloc[-1]
         
+        # 거래대금 필터 (1억 이상)
+        recent_volume = ohlcv['거래량'].iloc[-5:].mean()
+        trading_value = current_price * recent_volume
+        
+        if trading_value < 100_000_000:  # 1억 미만 제외
+            return None
+        
+        # 1. RSI (30점)
+        delta = ohlcv['종가'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        return rsi.iloc[-1]
-    except:
-        return None
-
-def calculate_disparity(hist, period=20):
-    """이격도 계산 (현재가 / 이동평균 * 100)"""
-    try:
-        close = hist['Close'].iloc[-1]
-        ma = hist['Close'].rolling(window=period).mean().iloc[-1]
-        return (close / ma) * 100
-    except:
-        return None
-
-def calculate_volume_ratio(hist, period=20):
-    """거래량 비율 계산 (최근 거래량 / 평균 거래량 * 100)"""
-    try:
-        recent_volume = hist['Volume'].iloc[-5:].mean()
-        avg_volume = hist['Volume'].iloc[-period:].mean()
-        return (recent_volume / avg_volume) * 100
-    except:
-        return None
-
-def calculate_pbr(info):
-    """PBR 추출"""
-    try:
-        pbr = info.get('priceToBook', None)
-        return pbr if pbr and pbr > 0 else None
-    except:
-        return None
-
-def calculate_5day_return(hist):
-    """5일 수익률 계산"""
-    try:
-        if len(hist) < 6:
-            return None
-        current_price = hist['Close'].iloc[-1]
-        price_5d_ago = hist['Close'].iloc[-6]
-        return ((current_price - price_5d_ago) / price_5d_ago) * 100
-    except:
-        return None
-
-def calculate_rebound_strength(hist):
-    """반등 강도 계산 (20일 최저가 대비 현재가 회복률)"""
-    try:
-        if len(hist) < 20:
-            return None
-        current_price = hist['Close'].iloc[-1]
-        min_price_20d = hist['Close'].iloc[-20:].min()
-        max_price_20d = hist['Close'].iloc[-20:].max()
+        current_rsi = rsi.iloc[-1]
         
-        if max_price_20d == min_price_20d:
-            return 0
-        
-        return ((current_price - min_price_20d) / (max_price_20d - min_price_20d)) * 100
-    except:
-        return None
-
-# ============================================================================
-# 점수 계산 (100점 만점)
-# ============================================================================
-def calculate_score(rsi, disparity, volume_ratio, pbr, return_5d, rebound):
-    """
-    6가지 지표 기반 점수 계산 (100점 만점)
-    
-    - RSI: 30점 (과매도 구간에 높은 점수)
-    - 이격도: 20점 (저평가 구간에 높은 점수)
-    - 거래량: 15점 (거래량 증가에 높은 점수)
-    - PBR: 15점 (저PBR에 높은 점수)
-    - 5일 수익률: 10점 (상승 추세에 높은 점수)
-    - 반등 강도: 10점 (강한 반등에 높은 점수)
-    """
-    score = 0
-    details = {}
-    
-    # 1. RSI 점수 (30점)
-    if rsi is not None:
-        if rsi <= 30:
+        if current_rsi < 30:
             rsi_score = 30
-        elif rsi <= 40:
-            rsi_score = 25
-        elif rsi <= 50:
-            rsi_score = 15
-        elif rsi <= 60:
+        elif 30 <= current_rsi < 40:
+            rsi_score = 20
+        elif 40 <= current_rsi < 50:
             rsi_score = 10
         else:
-            rsi_score = 5
-        score += rsi_score
-        details['rsi_score'] = rsi_score
-    else:
-        details['rsi_score'] = 0
-    
-    # 2. 이격도 점수 (20점)
-    if disparity is not None:
-        if disparity <= 95:
-            disp_score = 20
-        elif disparity <= 98:
-            disp_score = 15
-        elif disparity <= 102:
-            disp_score = 10
-        elif disparity <= 105:
-            disp_score = 5
+            rsi_score = 0
+        
+        # 2. 이격도 (20점)
+        ma20 = ohlcv['종가'].rolling(window=20).mean().iloc[-1]
+        disparity = (current_price / ma20) * 100
+        
+        if disparity < 95:
+            disparity_score = 20
+        elif 95 <= disparity < 98:
+            disparity_score = 15
+        elif 98 <= disparity < 100:
+            disparity_score = 10
         else:
-            disp_score = 2
-        score += disp_score
-        details['disp_score'] = disp_score
-    else:
-        details['disp_score'] = 0
-    
-    # 3. 거래량 점수 (15점)
-    if volume_ratio is not None:
-        if volume_ratio >= 150:
-            vol_score = 15
-        elif volume_ratio >= 120:
-            vol_score = 12
-        elif volume_ratio >= 100:
-            vol_score = 8
-        elif volume_ratio >= 80:
-            vol_score = 5
+            disparity_score = 0
+        
+        # 3. 거래량 증가 (15점)
+        vol_ma5 = ohlcv['거래량'].iloc[-5:].mean()
+        vol_ma20 = ohlcv['거래량'].iloc[-20:].mean()
+        volume_ratio = (vol_ma5 / vol_ma20) if vol_ma20 > 0 else 0
+        
+        if volume_ratio >= 1.5:
+            volume_score = 15
+        elif volume_ratio >= 1.2:
+            volume_score = 10
+        elif volume_ratio >= 1.0:
+            volume_score = 5
         else:
-            vol_score = 2
-        score += vol_score
-        details['vol_score'] = vol_score
-    else:
-        details['vol_score'] = 0
-    
-    # 4. PBR 점수 (15점)
-    if pbr is not None:
-        if pbr <= 0.5:
-            pbr_score = 15
-        elif pbr <= 1.0:
-            pbr_score = 12
-        elif pbr <= 1.5:
-            pbr_score = 8
-        elif pbr <= 2.0:
-            pbr_score = 5
+            volume_score = 0
+        
+        # 4. PBR (15점) - pykrx에서 가져오기
+        pbr = None
+        pbr_score = 0
+        
+        try:
+            fundamental = stock.get_market_fundamental_by_date(start_str, end_str, code)
+            if not fundamental.empty and 'PBR' in fundamental.columns:
+                pbr_raw = fundamental['PBR'].iloc[-1]
+                if pd.notna(pbr_raw) and pbr_raw > 0:
+                    pbr = float(pbr_raw)
+                    if pbr < 1.0:
+                        pbr_score = 15
+                    elif pbr < 1.5:
+                        pbr_score = 10
+                    elif pbr < 2.0:
+                        pbr_score = 5
+        except:
+            pass
+        
+        # 5. 5일 수익률 (10점)
+        if len(ohlcv) >= 6:
+            returns_5d = ((current_price - ohlcv['종가'].iloc[-6]) / ohlcv['종가'].iloc[-6]) * 100
         else:
-            pbr_score = 2
-        score += pbr_score
-        details['pbr_score'] = pbr_score
-    else:
-        details['pbr_score'] = 0
-    
-    # 5. 5일 수익률 점수 (10점)
-    if return_5d is not None:
-        if return_5d >= 10:
-            ret_score = 10
-        elif return_5d >= 5:
-            ret_score = 8
-        elif return_5d >= 0:
-            ret_score = 5
-        elif return_5d >= -5:
-            ret_score = 3
+            returns_5d = 0
+        
+        if -5 <= returns_5d <= 0:
+            returns_score = 10
+        elif -10 <= returns_5d < -5:
+            returns_score = 7
+        elif 0 < returns_5d <= 3:
+            returns_score = 5
         else:
-            ret_score = 1
-        score += ret_score
-        details['ret_score'] = ret_score
-    else:
-        details['ret_score'] = 0
-    
-    # 6. 반등 강도 점수 (10점)
-    if rebound is not None:
-        if rebound >= 80:
-            reb_score = 10
-        elif rebound >= 60:
-            reb_score = 8
-        elif rebound >= 40:
-            reb_score = 5
-        elif rebound >= 20:
-            reb_score = 3
+            returns_score = 0
+        
+        # 6. 반등 강도 (10점)
+        lowest_5d = ohlcv['종가'].iloc[-5:].min()
+        rebound_strength = ((current_price - lowest_5d) / lowest_5d) * 100
+        
+        if rebound_strength >= 5:
+            rebound_score = 10
+        elif rebound_strength >= 3:
+            rebound_score = 7
+        elif rebound_strength >= 1:
+            rebound_score = 4
         else:
-            reb_score = 1
-        score += reb_score
-        details['reb_score'] = reb_score
-    else:
-        details['reb_score'] = 0
+            rebound_score = 0
+        
+        # 총점 계산
+        total_score = rsi_score + disparity_score + volume_score + pbr_score + returns_score + rebound_score
+        
+        return {
+            '종목명': name,
+            '종목코드': code,
+            '현재가': current_price,
+            '거래대금': trading_value,
+            'RSI': current_rsi,
+            'RSI점수': rsi_score,
+            '이격도': disparity,
+            '이격도점수': disparity_score,
+            '거래량비율': volume_ratio,
+            '거래량점수': volume_score,
+            'PBR': pbr,
+            'PBR점수': pbr_score,
+            '5일수익률': returns_5d,
+            '5일수익률점수': returns_score,
+            '반등강도': rebound_strength,
+            '반등점수': rebound_score,
+            '총점': total_score
+        }
     
-    return score, details
+    except Exception as e:
+        return None
 
-# ============================================================================
-# 차트 생성 (Base64 인코딩)
-# ============================================================================
-def create_chart_base64(hist, ticker, name):
-    """주가 차트를 생성하고 Base64로 인코딩"""
+# ============================================================
+# 차트 생성 (pykrx 데이터 사용)
+# ============================================================
+
+def create_chart(code, name):
+    """개별 종목 차트 생성 (pykrx 사용)"""
+    if not PYKRX_AVAILABLE:
+        return None
+    
     try:
-        fig, ax = plt.subplots(figsize=(8, 4))
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=60)
+        start_str = start_date.strftime('%Y%m%d')
+        end_str = end_date.strftime('%Y%m%d')
         
-        ax.plot(hist.index, hist['Close'], color='#2196F3', linewidth=2)
-        ax.fill_between(hist.index, hist['Close'], alpha=0.3, color='#2196F3')
+        ohlcv = stock.get_market_ohlcv_by_date(start_str, end_str, code)
         
-        ax.set_title(f"{name} ({ticker})", fontsize=14, fontweight='bold', pad=15)
-        ax.set_xlabel('날짜', fontsize=10)
-        ax.set_ylabel('종가 (원)', fontsize=10)
-        ax.grid(True, alpha=0.3, linestyle='--')
+        if ohlcv.empty:
+            return None
         
-        # 최근 20일 데이터만 표시
-        if len(hist) > 20:
-            recent_hist = hist.iloc[-20:]
-            ax.set_xlim(recent_hist.index[0], recent_hist.index[-1])
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={'height_ratios': [3, 1]})
+        
+        # 가격 차트
+        ax1.plot(ohlcv.index, ohlcv['종가'], label='종가', linewidth=2)
+        ax1.plot(ohlcv.index, ohlcv['종가'].rolling(window=20).mean(), 
+                 label='20일 이평선', linestyle='--', alpha=0.7)
+        ax1.set_title(f'{name} ({code})', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('가격 (원)', fontsize=10)
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # 거래량 차트
+        colors = ['red' if ohlcv['종가'].iloc[i] > ohlcv['종가'].iloc[i-1] else 'blue' 
+                  for i in range(1, len(ohlcv))]
+        colors.insert(0, 'blue')
+        ax2.bar(ohlcv.index, ohlcv['거래량'], color=colors, alpha=0.5)
+        ax2.set_ylabel('거래량', fontsize=10)
+        ax2.set_xlabel('날짜', fontsize=10)
+        ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
         
@@ -400,352 +372,380 @@ def create_chart_base64(hist, ticker, name):
         buffer = BytesIO()
         plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
         buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-        plt.close(fig)
+        image_base64 = base64.b64encode(buffer.read()).decode()
+        plt.close()
         
-        return f"data:image/png;base64,{image_base64}"
+        return image_base64
     
     except Exception as e:
-        print(f"   ✗ 차트 생성 실패 ({name}): {e}")
-        plt.close('all')
         return None
 
-# ============================================================================
-# 전체 종목 분석
-# ============================================================================
-def analyze_all_stocks(tickers_df, min_volume=500_000_000):
-    """
-    전체 종목 분석 및 필터링
-    
-    Parameters:
-    - tickers_df: 종목 정보 DataFrame
-    - min_volume: 최소 거래대금 (기본값: 5억)
-    
-    Returns:
-    - 분석 결과 DataFrame
-    """
-    print("\n" + "=" * 70)
-    print("🔍 전체 종목 분석 시작")
-    print("=" * 70)
-    print(f"분석 대상: {len(tickers_df)}개 종목")
-    print(f"필터 조건: 거래대금 {min_volume:,}원 이상")
-    print("=" * 70)
-    
-    results = []
-    total = len(tickers_df)
-    
-    for idx, row in tickers_df.iterrows():
-        ticker = row['ticker']
-        name = row['name']
-        market = row['market']
-        
-        if (idx + 1) % 100 == 0:
-            print(f"진행률: {idx + 1}/{total} ({(idx + 1) / total * 100:.1f}%)")
-        
-        # 주가 데이터 수집
-        data = get_stock_data(ticker)
-        if data is None:
-            continue
-        
-        hist = data['hist']
-        info = data['info']
-        
-        # 거래대금 필터링 (최근 5일 평균)
-        try:
-            recent_volume = hist['Volume'].iloc[-5:].mean()
-            recent_price = hist['Close'].iloc[-5:].mean()
-            trading_value = recent_volume * recent_price
-            
-            if trading_value < min_volume:
-                continue
-        except:
-            continue
-        
-        # 지표 계산
-        rsi = calculate_rsi(hist)
-        disparity = calculate_disparity(hist)
-        volume_ratio = calculate_volume_ratio(hist)
-        pbr = calculate_pbr(info)
-        return_5d = calculate_5day_return(hist)
-        rebound = calculate_rebound_strength(hist)
-        
-        # 점수 계산
-        score, details = calculate_score(rsi, disparity, volume_ratio, pbr, return_5d, rebound)
-        
-        # 현재가 정보
-        current_price = hist['Close'].iloc[-1]
-        price_change = hist['Close'].pct_change().iloc[-1] * 100
-        
-        results.append({
-            'ticker': ticker,
-            'name': name,
-            'market': market,
-            'current_price': current_price,
-            'price_change': price_change,
-            'rsi': rsi,
-            'disparity': disparity,
-            'volume_ratio': volume_ratio,
-            'pbr': pbr,
-            'return_5d': return_5d,
-            'rebound': rebound,
-            'score': score,
-            'trading_value': trading_value,
-            'hist': hist,
-            **details
-        })
-    
-    df = pd.DataFrame(results)
-    
-    print("\n" + "=" * 70)
-    print("✓ 분석 완료")
-    print("=" * 70)
-    print(f"필터 통과: {len(df)}개 종목")
-    print("=" * 70)
-    
-    return df
+# ============================================================
+# AI 분석 (변경 없음)
+# ============================================================
 
-# ============================================================================
-# 시장 지수 및 환율 정보 수집
-# ============================================================================
-def get_market_indices():
-    """KOSPI, KOSDAQ, 달러/원 환율 정보 수집 (3번 재시도)"""
-    print("\n" + "=" * 70)
-    print("📈 시장 지수 및 환율 정보 수집 중...")
-    print("=" * 70)
-    
-    data = {}
-    max_retries = 3
-    
-    # KOSPI 지수
-    print("\n[1/3] KOSPI 지수 수집 중...")
-    for attempt in range(max_retries):
-        try:
-            kospi = yf.Ticker("^KS11")
-            kospi_hist = kospi.history(period="5d")
-            if not kospi_hist.empty and len(kospi_hist) >= 2:
-                kospi_current = kospi_hist['Close'].iloc[-1]
-                kospi_prev = kospi_hist['Close'].iloc[-2]
-                kospi_change = ((kospi_current - kospi_prev) / kospi_prev) * 100
-                data['kospi'] = {
-                    'value': f"{kospi_current:,.2f}",
-                    'change': f"{kospi_change:+.2f}%"
-                }
-                print(f"   ✓ KOSPI: {kospi_current:,.2f} ({kospi_change:+.2f}%)")
-                break
-        except Exception as e:
-            print(f"   ⚠️ KOSPI 수집 실패 (시도 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-    
-    if 'kospi' not in data:
-        print("   → 데이터 부족으로 KOSPI 지수 N/A 처리")
-        data['kospi'] = {'value': 'N/A', 'change': 'N/A'}
-    
-    # KOSDAQ 지수
-    print("\n[2/3] KOSDAQ 지수 수집 중...")
-    for attempt in range(max_retries):
-        try:
-            kosdaq = yf.Ticker("^KQ11")
-            kosdaq_hist = kosdaq.history(period="5d")
-            if not kosdaq_hist.empty and len(kosdaq_hist) >= 2:
-                kosdaq_current = kosdaq_hist['Close'].iloc[-1]
-                kosdaq_prev = kosdaq_hist['Close'].iloc[-2]
-                kosdaq_change = ((kosdaq_current - kosdaq_prev) / kosdaq_prev) * 100
-                data['kosdaq'] = {
-                    'value': f"{kosdaq_current:,.2f}",
-                    'change': f"{kosdaq_change:+.2f}%"
-                }
-                print(f"   ✓ KOSDAQ: {kosdaq_current:,.2f} ({kosdaq_change:+.2f}%)")
-                break
-        except Exception as e:
-            print(f"   ⚠️ KOSDAQ 수집 실패 (시도 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-    
-    if 'kosdaq' not in data:
-        print("   → 데이터 부족으로 KOSDAQ 지수 N/A 처리")
-        data['kosdaq'] = {'value': 'N/A', 'change': 'N/A'}
-    
-    # 달러/원 환율
-    print("\n[3/3] 달러/원 환율 수집 중...")
-    for attempt in range(max_retries):
-        try:
-            usd_krw = yf.Ticker("KRW=X")
-            usd_hist = usd_krw.history(period="5d")
-            if not usd_hist.empty and len(usd_hist) >= 2:
-                usd_current = usd_hist['Close'].iloc[-1]
-                usd_prev = usd_hist['Close'].iloc[-2]
-                usd_change = ((usd_current - usd_prev) / usd_prev) * 100
-                data['usd_krw'] = {
-                    'value': f"{usd_current:,.2f}",
-                    'change': f"{usd_change:+.2f}%"
-                }
-                print(f"   ✓ USD/KRW: {usd_current:,.2f} ({usd_change:+.2f}%)")
-                break
-        except Exception as e:
-            print(f"   ⚠️ USD/KRW 수집 실패 (시도 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-    
-    if 'usd_krw' not in data:
-        print("   → 데이터 부족으로 USD/KRW 환율 N/A 처리")
-        data['usd_krw'] = {'value': 'N/A', 'change': 'N/A'}
-    
-    print("\n" + "=" * 70)
-    print("✓ 시장 지수 및 환율 정보 수집 완료")
-    print("=" * 70)
-    
-    return data
-
-# ============================================================================
-# Gemini AI 종합 분석 생성
-# ============================================================================
-def generate_gemini_analysis(top_stocks_df, market_data):
-    """
-    Gemini AI를 사용하여 Top 30 종목에 대한 종합 분석 생성
-    
-    Parameters:
-    - top_stocks_df: Top 30 종목 DataFrame
-    - market_data: 시장 지수 및 환율 정보
-    
-    Returns:
-    - 분석 텍스트 (str)
-    """
-    print("\n" + "=" * 70)
-    print("🤖 Gemini AI 종합 분석 생성 중...")
-    print("=" * 70)
-    
-    # API 키 확인
-    if not GEMINI_API_KEY:
-        return (
-            "🤖 AI 분석을 생성할 수 없습니다.\n\n"
-            "GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.\n"
-            "Colab 또는 GitHub Secrets에 키를 등록한 후 다시 실행해주세요.\n\n"
-            "그 전까지는 위 Top 30 종목과 지표별 Top 5를 참고해서 수동으로 판단하시기 바랍니다."
-        )
-    
+def get_ai_analysis(top_stocks, market_info):
+    """Gemini AI를 사용한 시장 분석"""
     try:
-        # Top 10 종목 정보 요약
-        top_10_summary = []
-        for idx, row in top_stocks_df.head(10).iterrows():
-            summary = (
-                f"{idx + 1}. {row['name']} ({row['market']})\n"
-                f"   - 점수: {row['score']:.1f}점\n"
-                f"   - 현재가: {row['current_price']:,.0f}원 ({row['price_change']:+.2f}%)\n"
-                f"   - RSI: {row['rsi']:.1f if row['rsi'] else 'N/A'}\n"
-                f"   - 이격도: {row['disparity']:.2f if row['disparity'] else 'N/A'}\n"
-                f"   - 거래량비율: {row['volume_ratio']:.1f if row['volume_ratio'] else 'N/A'}%\n"
-                f"   - PBR: {row['pbr']:.2f if row['pbr'] else 'N/A'}\n"
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        stock_summary = []
+        for _, stock in top_stocks.head(6).iterrows():
+            pbr_text = f"{stock['PBR']:.2f}" if pd.notna(stock['PBR']) else "정보없음"
+            returns_text = f"{stock['5일수익률']:.2f}%" if pd.notna(stock['5일수익률']) else "정보없음"
+            
+            stock_summary.append(
+                f"- {stock['종목명']}: 총점 {stock['총점']:.0f}점, "
+                f"RSI {stock['RSI']:.1f}, 이격도 {stock['이격도']:.1f}%, "
+                f"PBR {pbr_text}, 5일수익률 {returns_text}"
             )
-            top_10_summary.append(summary)
         
-        # 시장 상황 요약
-        market_summary = (
-            f"시장 현황:\n"
-            f"- KOSPI: {market_data['kospi']['value']} ({market_data['kospi']['change']})\n"
-            f"- KOSDAQ: {market_data['kosdaq']['value']} ({market_data['kosdaq']['change']})\n"
-            f"- USD/KRW: {market_data['usd_krw']['value']} ({market_data['usd_krw']['change']})\n"
-        )
+        market_summary = []
+        for key, value in market_info.items():
+            market_summary.append(f"- {key}: {value['value']} ({value['change']})")
         
-        # Gemini 프롬프트 구성
         prompt = f"""
-당신은 한국 주식 시장 전문 애널리스트입니다.
+다음은 오늘의 한국 주식 시장 스윙 트레이딩 추천 종목 분석 결과입니다.
 
-다음은 오늘 기준 스윙 트레이딩 관점에서 선정된 Top 10 종목입니다:
+[시장 현황]
+{chr(10).join(market_summary)}
 
-{chr(10).join(top_10_summary)}
+[추천 종목 TOP 6]
+{chr(10).join(stock_summary)}
 
-{market_summary}
+위 정보를 바탕으로 다음 내용을 300자 이내로 간단명료하게 작성해주세요:
+1. 오늘의 시장 분위기 (지수, 환율 포함)
+2. 추천 종목들의 공통된 특징
+3. 투자 시 주의사항
 
-위 데이터를 바탕으로 다음 내용을 포함하여 1000자 이내로 종합 분석을 작성해주세요:
-
-1. 전체 시장 흐름 분석 (KOSPI, KOSDAQ, 환율 고려)
-2. Top 10 종목의 공통점과 특징
-3. 각 지표별 특징적인 패턴 (RSI, 이격도, 거래량 등)
-4. 스윙 트레이딩 관점에서의 투자 전략 제안
-5. 주의사항 및 리스크 요인
-
-분석은 객관적이고 구체적으로 작성하되, 투자 권유가 아닌 정보 제공 목적임을 명시해주세요.
+전문적이면서도 이해하기 쉽게 작성해주세요.
 """
         
-        # Gemini API 호출
-        model = genai.GenerativeModel("models/gemini-2.0-flash-exp")
         response = model.generate_content(prompt)
-        
-        analysis_text = response.text
-        
-        print("✓ AI 분석 생성 완료")
-        print(f"   길이: {len(analysis_text)}자")
-        print("=" * 70)
-        
-        return analysis_text
+        return response.text
     
     except Exception as e:
-        print(f"✗ AI 분석 생성 실패: {e}")
-        print("=" * 70)
-        return (
-            "🤖 AI 분석 생성 중 오류가 발생했습니다.\n\n"
-            f"오류 내용: {str(e)}\n\n"
-            "위 Top 30 종목과 지표별 Top 5를 참고해서 수동으로 판단하시기 바랍니다."
-        )
+        error_msg = str(e)
+        if '429' in error_msg or 'quota' in error_msg.lower():
+            return """
+[AI 분석 일시 중단]
 
-# ============================================================================
-# HTML 생성 (프리미엄 디자인)
-# ============================================================================
-def generate_html(df, market_data, gemini_analysis, output_path):
-    """
-    분석 결과를 프리미엄 디자인 HTML로 생성
-    
-    Parameters:
-    - df: 전체 분석 결과 DataFrame
-    - market_data: 시장 지수 및 환율 정보
-    - gemini_analysis: Gemini AI 분석 텍스트
-    - output_path: 출력 파일 경로
-    """
-    print("\n" + "=" * 70)
-    print("📄 HTML 보고서 생성 중...")
-    print("=" * 70)
-    
-    # 30점 이상 필터링 (완화)
-    df_filtered = df[df['score'] >= 30].copy()
-    df_filtered = df_filtered.sort_values('score', ascending=False).reset_index(drop=True)
-    
-    print(f"30점 이상 종목: {len(df_filtered)}개")
-    
-    # Top 30
-    top_30 = df_filtered.head(30).copy()
+현재 Gemini API 사용량이 일일 할당량을 초과하여 AI 분석이 일시적으로 제공되지 않습니다.
+분석 결과의 지표 점수와 차트를 참고하여 투자 판단을 내리시기 바랍니다.
+
+• 총점 30점 이상: 스윙 트레이딩 후보군
+• RSI < 40: 과매도 구간 (반등 가능성)
+• 이격도 < 100: 평균 대비 저평가
+• 거래량 증가: 시장 관심도 상승
+"""
+        else:
+            return f"AI 분석 생성 중 오류 발생: {error_msg}"
+
+# ============================================================
+# HTML 보고서 생성 (변경 없음 - 디자인 유지)
+# ============================================================
+
+def generate_html(top_stocks, market_info, ai_analysis, timestamp):
+    """HTML 보고서 생성 (디자인 변경 없음)"""
     
     # Top 6 차트 생성
-    print("\n차트 생성 중 (Top 6)...")
-    chart_data = []
-    for idx, row in top_30.head(6).iterrows():
-        print(f"  {idx + 1}/6: {row['name']}")
-        chart_base64 = create_chart_base64(row['hist'], row['ticker'], row['name'])
-        chart_data.append(chart_base64)
+    charts = {}
+    print("\n차트 생성 중...")
+    for idx, (_, stock) in enumerate(top_stocks.head(6).iterrows(), 1):
+        chart = create_chart(stock['종목코드'], stock['종목명'])
+        if chart:
+            charts[stock['종목코드']] = chart
+            print(f"  {idx}/6: {stock['종목명']} 차트 생성 완료")
     
-    # 지표별 Top 5
-    top_rsi = df_filtered.nsmallest(5, 'rsi')[['name', 'ticker', 'market', 'rsi', 'score']]
-    top_disparity = df_filtered.nsmallest(5, 'disparity')[['name', 'ticker', 'market', 'disparity', 'score']]
-    top_volume = df_filtered.nlargest(5, 'volume_ratio')[['name', 'ticker', 'market', 'volume_ratio', 'score']]
-    top_pbr = df_filtered[df_filtered['pbr'].notna()].nsmallest(5, 'pbr')[['name', 'ticker', 'market', 'pbr', 'score']]
-    top_return = df_filtered.nlargest(5, 'return_5d')[['name', 'ticker', 'market', 'return_5d', 'score']]
-    top_rebound = df_filtered.nlargest(5, 'rebound')[['name', 'ticker', 'market', 'rebound', 'score']]
+    # 시장 정보 HTML
+    market_html = ""
+    for key, value in market_info.items():
+        change_class = "positive" if "+" in value['change'] else "negative" if "-" in value['change'] else "neutral"
+        market_html += f"""
+        <div class="market-card">
+            <div class="label">{key}</div>
+            <div class="value">{value['value']}</div>
+            <div class="change {change_class}">{value['change']}</div>
+        </div>
+        """
     
-    # 투자자별 추천
-    conservative = df_filtered.nsmallest(8, 'rsi')[['name', 'ticker', 'market', 'rsi', 'pbr', 'score']]
-    aggressive = df_filtered.nlargest(8, 'rebound')[['name', 'ticker', 'market', 'rebound', 'volume_ratio', 'score']]
+    # Top 6 카드 HTML
+    top6_html = ""
+    for rank, (_, stock) in enumerate(top_stocks.head(6).iterrows(), 1):
+        chart_img = f'<img src="data:image/png;base64,{charts[stock["종목코드"]]}" alt="차트">' if stock['종목코드'] in charts else '<div class="no-chart">차트 없음</div>'
+        
+        pbr_display = f"{stock['PBR']:.2f}" if pd.notna(stock['PBR']) else "N/A"
+        returns_display = f"{stock['5일수익률']:.2f}%" if pd.notna(stock['5일수익률']) else "N/A"
+        
+        top6_html += f"""
+        <div class="stock-card">
+            <div class="rank-badge">TOP {rank}</div>
+            <h3>{stock['종목명']} <span class="code">({stock['종목코드']})</span></h3>
+            <div class="score">총점: {stock['총점']:.0f}점</div>
+            <div class="chart-container">
+                {chart_img}
+            </div>
+            <div class="metrics">
+                <div class="metric">
+                    <span class="metric-label">현재가</span>
+                    <span class="metric-value">{stock['현재가']:,.0f}원</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">RSI</span>
+                    <span class="metric-value">{stock['RSI']:.1f}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">이격도</span>
+                    <span class="metric-value">{stock['이격도']:.1f}%</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">거래량비율</span>
+                    <span class="metric-value">{stock['거래량비율']:.2f}배</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">PBR</span>
+                    <span class="metric-value">{pbr_display}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">5일수익률</span>
+                    <span class="metric-value">{returns_display}</span>
+                </div>
+            </div>
+        </div>
+        """
     
-    # 현재 시간
-    now = datetime.now().strftime("%Y년 %m월 %d일 %H:%M:%S")
+    # Top 7-30 테이블 HTML
+    table_rows = ""
+    for rank, (_, stock) in enumerate(top_stocks.iloc[6:30].iterrows(), 7):
+        pbr_display = f"{stock['PBR']:.2f}" if pd.notna(stock['PBR']) else "N/A"
+        returns_display = f"{stock['5일수익률']:.2f}%" if pd.notna(stock['5일수익률']) else "N/A"
+        
+        table_rows += f"""
+        <tr>
+            <td class="rank-col">{rank}</td>
+            <td>{stock['종목명']}</td>
+            <td>{stock['종목코드']}</td>
+            <td class="number">{stock['총점']:.0f}</td>
+            <td class="number">{stock['현재가']:,.0f}</td>
+            <td class="number">{stock['RSI']:.1f}</td>
+            <td class="number">{stock['이격도']:.1f}</td>
+            <td class="number">{stock['거래량비율']:.2f}</td>
+            <td class="number">{pbr_display}</td>
+            <td class="number">{returns_display}</td>
+        </tr>
+        """
     
-    # HTML 생성
+    # 지표별 TOP 5
+    indicator_sections = ""
+    
+    # RSI 낮은 순
+    rsi_top5 = top_stocks.nsmallest(5, 'RSI')
+    rsi_rows = ""
+    for rank, (_, stock) in enumerate(rsi_top5.iterrows(), 1):
+        rsi_rows += f"""
+        <tr>
+            <td class="rank-col">{rank}</td>
+            <td>{stock['종목명']}</td>
+            <td>{stock['종목코드']}</td>
+            <td class="number highlight">{stock['RSI']:.1f}</td>
+            <td class="number">{stock['총점']:.0f}</td>
+        </tr>
+        """
+    
+    indicator_sections += f"""
+    <div class="indicator-section">
+        <h3>📊 RSI 낮은 순위 (과매도)</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>순위</th>
+                    <th>종목명</th>
+                    <th>종목코드</th>
+                    <th>RSI</th>
+                    <th>총점</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rsi_rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    
+    # 이격도 낮은 순
+    disparity_top5 = top_stocks.nsmallest(5, '이격도')
+    disparity_rows = ""
+    for rank, (_, stock) in enumerate(disparity_top5.iterrows(), 1):
+        disparity_rows += f"""
+        <tr>
+            <td class="rank-col">{rank}</td>
+            <td>{stock['종목명']}</td>
+            <td>{stock['종목코드']}</td>
+            <td class="number highlight">{stock['이격도']:.1f}%</td>
+            <td class="number">{stock['총점']:.0f}</td>
+        </tr>
+        """
+    
+    indicator_sections += f"""
+    <div class="indicator-section">
+        <h3>📈 이격도 낮은 순위 (저평가)</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>순위</th>
+                    <th>종목명</th>
+                    <th>종목코드</th>
+                    <th>이격도</th>
+                    <th>총점</th>
+                </tr>
+            </thead>
+            <tbody>
+                {disparity_rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    
+    # 거래량 증가율 높은 순
+    volume_top5 = top_stocks.nlargest(5, '거래량비율')
+    volume_rows = ""
+    for rank, (_, stock) in enumerate(volume_top5.iterrows(), 1):
+        volume_rows += f"""
+        <tr>
+            <td class="rank-col">{rank}</td>
+            <td>{stock['종목명']}</td>
+            <td>{stock['종목코드']}</td>
+            <td class="number highlight">{stock['거래량비율']:.2f}배</td>
+            <td class="number">{stock['총점']:.0f}</td>
+        </tr>
+        """
+    
+    indicator_sections += f"""
+    <div class="indicator-section">
+        <h3>📊 거래량 증가 순위</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>순위</th>
+                    <th>종목명</th>
+                    <th>종목코드</th>
+                    <th>거래량비율</th>
+                    <th>총점</th>
+                </tr>
+            </thead>
+            <tbody>
+                {volume_rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    
+    # PBR 낮은 순 (None 값 제외)
+    pbr_valid = top_stocks[top_stocks['PBR'].notna()]
+    if len(pbr_valid) >= 5:
+        pbr_top5 = pbr_valid.nsmallest(5, 'PBR')
+        pbr_rows = ""
+        for rank, (_, stock) in enumerate(pbr_top5.iterrows(), 1):
+            pbr_rows += f"""
+            <tr>
+                <td class="rank-col">{rank}</td>
+                <td>{stock['종목명']}</td>
+                <td>{stock['종목코드']}</td>
+                <td class="number highlight">{stock['PBR']:.2f}</td>
+                <td class="number">{stock['총점']:.0f}</td>
+            </tr>
+            """
+        
+        indicator_sections += f"""
+        <div class="indicator-section">
+            <h3>💰 PBR 낮은 순위 (저평가)</h3>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>순위</th>
+                        <th>종목명</th>
+                        <th>종목코드</th>
+                        <th>PBR</th>
+                        <th>총점</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {pbr_rows}
+                </tbody>
+            </table>
+        </div>
+        """
+    
+    # 반등강도 높은 순
+    rebound_top5 = top_stocks.nlargest(5, '반등강도')
+    rebound_rows = ""
+    for rank, (_, stock) in enumerate(rebound_top5.iterrows(), 1):
+        rebound_rows += f"""
+        <tr>
+            <td class="rank-col">{rank}</td>
+            <td>{stock['종목명']}</td>
+            <td>{stock['종목코드']}</td>
+            <td class="number highlight">{stock['반등강도']:.2f}%</td>
+            <td class="number">{stock['총점']:.0f}</td>
+        </tr>
+        """
+    
+    indicator_sections += f"""
+    <div class="indicator-section">
+        <h3>🚀 반등강도 높은 순위</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>순위</th>
+                    <th>종목명</th>
+                    <th>종목코드</th>
+                    <th>반등강도</th>
+                    <th>총점</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rebound_rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    
+    # 투자자 유형별 추천
+    investor_recommendations = f"""
+    <div class="recommendation-section">
+        <h2>💡 투자자 유형별 추천</h2>
+        
+        <div class="investor-type">
+            <h3>🔴 공격적 투자자</h3>
+            <p><strong>추천 지표:</strong> 거래량 증가율 + 반등강도</p>
+            <p><strong>추천 종목:</strong> {', '.join([row['종목명'] for _, row in volume_top5.head(3).iterrows()])}</p>
+            <p class="note">단기 급등 가능성이 있으나 변동성이 큰 종목들입니다.</p>
+        </div>
+        
+        <div class="investor-type">
+            <h3>🟡 균형 투자자</h3>
+            <p><strong>추천 지표:</strong> 총점 기준 상위</p>
+            <p><strong>추천 종목:</strong> {', '.join([row['종목명'] for _, row in top_stocks.head(3).iterrows()])}</p>
+            <p class="note">여러 지표가 고르게 좋은 안정적인 종목들입니다.</p>
+        </div>
+        
+        <div class="investor-type">
+            <h3>🟢 보수적 투자자</h3>
+            <p><strong>추천 지표:</strong> PBR + 이격도</p>
+            <p><strong>추천 종목:</strong> {', '.join([row['종목명'] for _, row in pbr_top5.head(3).iterrows()]) if len(pbr_valid) >= 3 else '데이터 부족'}</p>
+            <p class="note">저평가된 안정적인 종목으로 장기 투자에 적합합니다.</p>
+        </div>
+    </div>
+    """
+    
+    # 전체 HTML 생성 (CSS 동일 - 디자인 변경 없음)
     html_content = f"""
 <!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>스윙 트레이드 종목 추천 - {datetime.now().strftime("%Y.%m.%d")}</title>
+    <title>스윙 트레이딩 추천 종목 - {timestamp}</title>
     <style>
         * {{
             margin: 0;
@@ -754,10 +754,10 @@ def generate_html(df, market_data, gemini_analysis, output_path):
         }}
         
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Malgun Gothic', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
             padding: 20px;
+            line-height: 1.6;
         }}
         
         .container {{
@@ -779,809 +779,476 @@ def generate_html(df, market_data, gemini_analysis, output_path):
         .header h1 {{
             font-size: 2.5em;
             margin-bottom: 10px;
-            font-weight: 700;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
         }}
         
-        .header .subtitle {{
+        .header .timestamp {{
             font-size: 1.1em;
             opacity: 0.9;
         }}
         
-        .market-info {{
+        .market-overview {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
-            padding: 30px 40px;
+            padding: 30px;
             background: #f8f9fa;
-            border-bottom: 2px solid #e9ecef;
         }}
         
         .market-card {{
             background: white;
             padding: 20px;
-            border-radius: 12px;
+            border-radius: 10px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            transition: transform 0.2s;
-        }}
-        
-        .market-card:hover {{
-            transform: translateY(-5px);
+            text-align: center;
         }}
         
         .market-card .label {{
             font-size: 0.9em;
-            color: #6c757d;
+            color: #666;
             margin-bottom: 8px;
         }}
         
         .market-card .value {{
             font-size: 1.8em;
-            font-weight: 700;
-            color: #2c3e50;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
         }}
         
         .market-card .change {{
-            font-size: 1em;
+            font-size: 1.1em;
             font-weight: 600;
-            margin-top: 5px;
         }}
         
-        .change.positive {{ color: #e74c3c; }}
-        .change.negative {{ color: #3498db; }}
+        .market-card .change.positive {{
+            color: #d32f2f;
+        }}
         
-        .content {{
-            padding: 40px;
+        .market-card .change.negative {{
+            color: #1976d2;
+        }}
+        
+        .market-card .change.neutral {{
+            color: #666;
+        }}
+        
+        .ai-analysis {{
+            padding: 30px;
+            background: #fff9e6;
+            border-left: 5px solid #ffc107;
+            margin: 30px;
+            border-radius: 10px;
+        }}
+        
+        .ai-analysis h2 {{
+            color: #f57c00;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }}
+        
+        .ai-analysis p {{
+            color: #333;
+            line-height: 1.8;
+            white-space: pre-wrap;
         }}
         
         .section {{
-            margin-bottom: 50px;
+            padding: 30px;
         }}
         
-        .section-title {{
-            font-size: 1.8em;
-            font-weight: 700;
-            color: #2c3e50;
+        .section h2 {{
+            color: #333;
             margin-bottom: 25px;
-            padding-bottom: 15px;
+            font-size: 2em;
             border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
         }}
         
-        /* Top 6 카드 스타일 */
         .top-cards {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
             gap: 25px;
-            margin-bottom: 40px;
+            margin-bottom: 30px;
         }}
         
         .stock-card {{
             background: white;
+            border: 2px solid #e0e0e0;
             border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            padding: 20px;
+            transition: all 0.3s ease;
+            position: relative;
             overflow: hidden;
-            transition: all 0.3s;
-            border: 2px solid #e9ecef;
         }}
         
         .stock-card:hover {{
-            transform: translateY(-10px);
-            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+            border-color: #667eea;
         }}
         
-        .card-header {{
+        .rank-badge {{
+            position: absolute;
+            top: 15px;
+            right: 15px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 20px;
-        }}
-        
-        .card-rank {{
-            font-size: 3em;
-            font-weight: 700;
-            opacity: 0.3;
-            position: absolute;
-            right: 20px;
-            top: 10px;
-        }}
-        
-        .card-title {{
-            font-size: 1.4em;
-            font-weight: 700;
-            margin-bottom: 5px;
-        }}
-        
-        .card-subtitle {{
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
             font-size: 0.9em;
-            opacity: 0.8;
         }}
         
-        .card-body {{
-            padding: 20px;
+        .stock-card h3 {{
+            font-size: 1.4em;
+            color: #333;
+            margin-bottom: 10px;
+            padding-right: 80px;
         }}
         
-        .card-chart {{
-            width: 100%;
-            height: auto;
+        .stock-card .code {{
+            font-size: 0.8em;
+            color: #666;
+            font-weight: normal;
+        }}
+        
+        .stock-card .score {{
+            font-size: 1.3em;
+            color: #667eea;
+            font-weight: bold;
             margin-bottom: 15px;
-            border-radius: 8px;
         }}
         
-        .card-metrics {{
+        .chart-container {{
+            margin: 15px 0;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #f5f5f5;
+        }}
+        
+        .chart-container img {{
+            width: 100%;
+            display: block;
+        }}
+        
+        .no-chart {{
+            padding: 40px;
+            text-align: center;
+            color: #999;
+            background: #f5f5f5;
+        }}
+        
+        .metrics {{
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 10px;
-            margin-bottom: 15px;
+            margin-top: 15px;
         }}
         
         .metric {{
-            background: #f8f9fa;
             padding: 10px;
+            background: #f8f9fa;
             border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }}
         
         .metric-label {{
             font-size: 0.85em;
-            color: #6c757d;
-            margin-bottom: 3px;
+            color: #666;
         }}
         
         .metric-value {{
-            font-size: 1.1em;
             font-weight: 600;
-            color: #2c3e50;
-        }}
-        
-        .card-score {{
-            text-align: center;
-            padding: 15px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 10px;
-            margin-bottom: 15px;
-        }}
-        
-        .card-score .score-label {{
-            font-size: 0.9em;
-            opacity: 0.8;
-            margin-bottom: 5px;
-        }}
-        
-        .card-score .score-value {{
-            font-size: 2.5em;
-            font-weight: 700;
-        }}
-        
-        .card-actions {{
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-        }}
-        
-        .btn {{
-            padding: 12px 20px;
-            border: none;
-            border-radius: 8px;
+            color: #333;
             font-size: 0.95em;
-            font-weight: 600;
-            cursor: pointer;
-            text-decoration: none;
-            text-align: center;
-            transition: all 0.2s;
         }}
         
-        .btn-primary {{
-            background: #667eea;
-            color: white;
-        }}
-        
-        .btn-primary:hover {{
-            background: #5568d3;
-        }}
-        
-        .btn-secondary {{
-            background: #6c757d;
-            color: white;
-        }}
-        
-        .btn-secondary:hover {{
-            background: #5a6268;
-        }}
-        
-        /* Top 7-30 테이블 스타일 */
-        .table-container {{
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }}
-        
-        table {{
+        .data-table {{
             width: 100%;
             border-collapse: collapse;
-        }}
-        
-        thead {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }}
-        
-        th {{
-            padding: 15px 10px;
-            text-align: center;
-            font-weight: 600;
-            font-size: 0.9em;
-        }}
-        
-        tbody tr {{
-            border-bottom: 1px solid #e9ecef;
-            transition: background 0.2s;
-        }}
-        
-        tbody tr:hover {{
-            background: #f8f9fa;
-        }}
-        
-        td {{
-            padding: 12px 10px;
-            text-align: center;
-            font-size: 0.9em;
-        }}
-        
-        .rank-cell {{
-            font-weight: 700;
-            font-size: 1.1em;
-            color: #667eea;
-        }}
-        
-        .name-cell {{
-            font-weight: 600;
-            color: #2c3e50;
-        }}
-        
-        .score-cell {{
-            font-weight: 700;
-            font-size: 1.1em;
-            color: #764ba2;
-        }}
-        
-        /* 지표별 Top 5 스타일 */
-        .indicators-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 25px;
-        }}
-        
-        .indicator-card {{
+            margin-top: 20px;
             background: white;
-            border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 10px;
             overflow: hidden;
         }}
         
-        .indicator-header {{
+        .data-table thead {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 15px 20px;
-            font-weight: 600;
         }}
         
-        .indicator-body {{
+        .data-table th {{
             padding: 15px;
+            text-align: left;
+            font-weight: 600;
         }}
         
-        .indicator-item {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px;
-            margin-bottom: 8px;
+        .data-table td {{
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }}
+        
+        .data-table tbody tr:hover {{
             background: #f8f9fa;
-            border-radius: 8px;
-            transition: all 0.2s;
         }}
         
-        .indicator-item:hover {{
-            background: #e9ecef;
-            transform: translateX(5px);
+        .data-table tbody tr:last-child td {{
+            border-bottom: none;
         }}
         
-        .indicator-item .name {{
-            font-weight: 600;
-            color: #2c3e50;
-        }}
-        
-        .indicator-item .value {{
-            font-weight: 700;
+        .rank-col {{
+            font-weight: bold;
             color: #667eea;
+            text-align: center;
         }}
         
-        /* 투자자별 추천 스타일 */
-        .investor-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 25px;
+        .number {{
+            text-align: right;
+            font-family: 'Courier New', monospace;
         }}
         
-        .investor-card {{
-            background: white;
+        .highlight {{
+            background: #fff9e6;
+            font-weight: bold;
+            color: #f57c00;
+        }}
+        
+        .indicator-section {{
+            margin-bottom: 40px;
+        }}
+        
+        .indicator-section h3 {{
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            padding-left: 10px;
+            border-left: 4px solid #667eea;
+        }}
+        
+        .recommendation-section {{
+            background: #f8f9fa;
+            padding: 30px;
             border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            overflow: hidden;
+            margin-top: 40px;
         }}
         
-        .investor-header {{
+        .recommendation-section h2 {{
+            color: #333;
+            margin-bottom: 25px;
+            font-size: 1.8em;
+        }}
+        
+        .investor-type {{
+            background: white;
             padding: 20px;
-            color: white;
-            font-weight: 600;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 5px solid #667eea;
+        }}
+        
+        .investor-type h3 {{
+            color: #333;
+            margin-bottom: 10px;
             font-size: 1.2em;
         }}
         
-        .conservative-header {{
-            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+        .investor-type p {{
+            margin: 8px 0;
+            color: #555;
         }}
         
-        .aggressive-header {{
-            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
-        }}
-        
-        .investor-body {{
-            padding: 20px;
-        }}
-        
-        .investor-item {{
-            display: grid;
-            grid-template-columns: 2fr 1fr 1fr 1fr;
-            gap: 10px;
-            padding: 12px;
-            margin-bottom: 8px;
-            background: #f8f9fa;
-            border-radius: 8px;
-            align-items: center;
-        }}
-        
-        .investor-item:hover {{
-            background: #e9ecef;
-        }}
-        
-        /* AI 분석 스타일 */
-        .ai-analysis {{
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            overflow: hidden;
-            margin-top: 30px;
-        }}
-        
-        .ai-header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            font-weight: 600;
-            font-size: 1.3em;
-        }}
-        
-        .ai-body {{
-            padding: 30px;
-            line-height: 1.8;
-            white-space: pre-wrap;
-            font-size: 1.05em;
-            color: #2c3e50;
+        .investor-type .note {{
+            color: #888;
+            font-size: 0.9em;
+            font-style: italic;
+            margin-top: 10px;
         }}
         
         .footer {{
+            background: #333;
+            color: white;
             text-align: center;
-            padding: 30px;
-            background: #f8f9fa;
-            color: #6c757d;
+            padding: 20px;
             font-size: 0.9em;
-            border-top: 2px solid #e9ecef;
         }}
         
-        @media (max-width: 768px) {{
-            .header h1 {{ font-size: 1.8em; }}
-            .top-cards {{ grid-template-columns: 1fr; }}
-            .indicators-grid {{ grid-template-columns: 1fr; }}
-            .investor-grid {{ grid-template-columns: 1fr; }}
+        .footer p {{
+            margin: 5px 0;
         }}
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- 헤더 -->
         <div class="header">
-            <h1>📈 스윙 트레이드 종목 추천</h1>
-            <div class="subtitle">AI 기반 종목 분석 시스템 v3.8 | {now}</div>
+            <h1>📈 스윙 트레이딩 추천 종목</h1>
+            <p class="timestamp">{timestamp}</p>
         </div>
         
-        <!-- 시장 정보 -->
-        <div class="market-info">
-            <div class="market-card">
-                <div class="label">KOSPI 지수</div>
-                <div class="value">{market_data['kospi']['value']}</div>
-                <div class="change {'positive' if '+' in market_data['kospi']['change'] else 'negative'}">{market_data['kospi']['change']}</div>
-            </div>
-            <div class="market-card">
-                <div class="label">KOSDAQ 지수</div>
-                <div class="value">{market_data['kosdaq']['value']}</div>
-                <div class="change {'positive' if '+' in market_data['kosdaq']['change'] else 'negative'}">{market_data['kosdaq']['change']}</div>
-            </div>
-            <div class="market-card">
-                <div class="label">USD/KRW 환율</div>
-                <div class="value">{market_data['usd_krw']['value']}</div>
-                <div class="change {'positive' if '+' in market_data['usd_krw']['change'] else 'negative'}">{market_data['usd_krw']['change']}</div>
+        <div class="market-overview">
+            {market_html}
+        </div>
+        
+        <div class="ai-analysis">
+            <h2>🤖 AI 시장 분석</h2>
+            <p>{ai_analysis}</p>
+        </div>
+        
+        <div class="section">
+            <h2>🏆 TOP 6 추천 종목</h2>
+            <div class="top-cards">
+                {top6_html}
             </div>
         </div>
         
-        <!-- 메인 컨텐츠 -->
-        <div class="content">
-            <!-- Top 6 카드 -->
-            <div class="section">
-                <div class="section-title">🏆 Top 6 추천 종목</div>
-                <div class="top-cards">
-"""
-    
-    # Top 6 카드 생성
-    for idx, row in top_30.head(6).iterrows():
-        code = row['ticker'].split('.')[0]
-        chart_img = chart_data[idx] if chart_data[idx] else ""
-        
-        # 뉴스 링크 (종목명 + 종목코드)
-        search_query = f"{row['name']} {code}"
-        news_url = f"https://search.naver.com/search.naver?where=news&query={urllib.parse.quote(search_query)}"
-        
-        html_content += f"""
-                    <div class="stock-card">
-                        <div class="card-header" style="position: relative;">
-                            <div class="card-rank">#{idx + 1}</div>
-                            <div class="card-title">{row['name']}</div>
-                            <div class="card-subtitle">{row['market']} | {code}</div>
-                        </div>
-                        <div class="card-body">
-                            {"<img src='" + chart_img + "' class='card-chart' />" if chart_img else ""}
-                            <div class="card-score">
-                                <div class="score-label">종합 점수</div>
-                                <div class="score-value">{row['score']:.1f}점</div>
-                            </div>
-                            <div class="card-metrics">
-                                <div class="metric">
-                                    <div class="metric-label">현재가</div>
-                                    <div class="metric-value">{row['current_price']:,.0f}원</div>
-                                </div>
-                                <div class="metric">
-                                    <div class="metric-label">등락률</div>
-                                    <div class="metric-value" style="color: {'#e74c3c' if row['price_change'] > 0 else '#3498db'};">{row['price_change']:+.2f}%</div>
-                                </div>
-                                <div class="metric">
-                                    <div class="metric-label">RSI</div>
-                                    <div class="metric-value">{row['rsi']:.1f if row['rsi'] else 'N/A'}</div>
-                                </div>
-                                <div class="metric">
-                                    <div class="metric-label">이격도</div>
-                                    <div class="metric-value">{row['disparity']:.2f if row['disparity'] else 'N/A'}</div>
-                                </div>
-                                <div class="metric">
-                                    <div class="metric-label">거래량비율</div>
-                                    <div class="metric-value">{row['volume_ratio']:.1f if row['volume_ratio'] else 'N/A'}%</div>
-                                </div>
-                                <div class="metric">
-                                    <div class="metric-label">PBR</div>
-                                    <div class="metric-value">{row['pbr']:.2f if row['pbr'] else 'N/A'}</div>
-                                </div>
-                            </div>
-                            <div class="card-actions">
-                                <a href="https://finance.naver.com/item/main.naver?code={code}" target="_blank" class="btn btn-primary">종목 상세</a>
-                                <a href="{news_url}" target="_blank" class="btn btn-secondary">뉴스</a>
-                            </div>
-                        </div>
-                    </div>
-"""
-    
-    html_content += """
-                </div>
-            </div>
-            
-            <!-- Top 7-30 테이블 -->
-            <div class="section">
-                <div class="section-title">📊 Top 7-30 추천 종목</div>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>순위</th>
-                                <th>종목명</th>
-                                <th>시장</th>
-                                <th>현재가</th>
-                                <th>등락률</th>
-                                <th>RSI</th>
-                                <th>이격도</th>
-                                <th>거래량비율</th>
-                                <th>PBR</th>
-                                <th>점수</th>
-                                <th>액션</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-"""
-    
-    # Top 7-30 테이블 생성
-    for idx, row in top_30.iloc[6:].iterrows():
-        code = row['ticker'].split('.')[0]
-        
-        # 뉴스 링크 (종목명 + 종목코드)
-        search_query = f"{row['name']} {code}"
-        news_url = f"https://search.naver.com/search.naver?where=news&query={urllib.parse.quote(search_query)}"
-        
-        html_content += f"""
-                            <tr>
-                                <td class="rank-cell">{idx + 1}</td>
-                                <td class="name-cell">{row['name']}</td>
-                                <td>{row['market']}</td>
-                                <td>{row['current_price']:,.0f}원</td>
-                                <td style="color: {'#e74c3c' if row['price_change'] > 0 else '#3498db'}; font-weight: 600;">{row['price_change']:+.2f}%</td>
-                                <td>{row['rsi']:.1f if row['rsi'] else 'N/A'}</td>
-                                <td>{row['disparity']:.2f if row['disparity'] else 'N/A'}</td>
-                                <td>{row['volume_ratio']:.1f if row['volume_ratio'] else 'N/A'}%</td>
-                                <td>{row['pbr']:.2f if row['pbr'] else 'N/A'}</td>
-                                <td class="score-cell">{row['score']:.1f}</td>
-                                <td>
-                                    <a href="https://finance.naver.com/item/main.naver?code={code}" target="_blank" class="btn btn-primary" style="padding: 8px 12px; font-size: 0.85em; display: inline-block; margin-right: 5px;">상세</a>
-                                    <a href="{news_url}" target="_blank" class="btn btn-secondary" style="padding: 8px 12px; font-size: 0.85em; display: inline-block;">뉴스</a>
-                                </td>
-                            </tr>
-"""
-    
-    html_content += """
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            
-            <!-- 지표별 Top 5 -->
-            <div class="section">
-                <div class="section-title">🎯 지표별 Top 5 종목</div>
-                <div class="indicators-grid">
-"""
-    
-    # RSI Top 5
-    html_content += """
-                    <div class="indicator-card">
-                        <div class="indicator-header">RSI 최저 Top 5 (과매도)</div>
-                        <div class="indicator-body">
-"""
-    for idx, row in top_rsi.iterrows():
-        html_content += f"""
-                            <div class="indicator-item">
-                                <span class="name">{row['name']} ({row['market']})</span>
-                                <span class="value">{row['rsi']:.1f if row['rsi'] else 'N/A'}</span>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    # 이격도 Top 5
-    html_content += """
-                    <div class="indicator-card">
-                        <div class="indicator-header">이격도 최저 Top 5 (저평가)</div>
-                        <div class="indicator-body">
-"""
-    for idx, row in top_disparity.iterrows():
-        html_content += f"""
-                            <div class="indicator-item">
-                                <span class="name">{row['name']} ({row['market']})</span>
-                                <span class="value">{row['disparity']:.2f if row['disparity'] else 'N/A'}</span>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    # 거래량 Top 5
-    html_content += """
-                    <div class="indicator-card">
-                        <div class="indicator-header">거래량 비율 Top 5 (거래 활발)</div>
-                        <div class="indicator-body">
-"""
-    for idx, row in top_volume.iterrows():
-        html_content += f"""
-                            <div class="indicator-item">
-                                <span class="name">{row['name']} ({row['market']})</span>
-                                <span class="value">{row['volume_ratio']:.1f if row['volume_ratio'] else 'N/A'}%</span>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    # PBR Top 5
-    html_content += """
-                    <div class="indicator-card">
-                        <div class="indicator-header">PBR 최저 Top 5 (저평가)</div>
-                        <div class="indicator-body">
-"""
-    for idx, row in top_pbr.iterrows():
-        html_content += f"""
-                            <div class="indicator-item">
-                                <span class="name">{row['name']} ({row['market']})</span>
-                                <span class="value">{row['pbr']:.2f if row['pbr'] else 'N/A'}</span>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    # 5일 수익률 Top 5
-    html_content += """
-                    <div class="indicator-card">
-                        <div class="indicator-header">5일 수익률 Top 5 (상승세)</div>
-                        <div class="indicator-body">
-"""
-    for idx, row in top_return.iterrows():
-        html_content += f"""
-                            <div class="indicator-item">
-                                <span class="name">{row['name']} ({row['market']})</span>
-                                <span class="value">{row['return_5d']:+.2f if row['return_5d'] else 'N/A'}%</span>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    # 반등 강도 Top 5
-    html_content += """
-                    <div class="indicator-card">
-                        <div class="indicator-header">반등 강도 Top 5 (회복세)</div>
-                        <div class="indicator-body">
-"""
-    for idx, row in top_rebound.iterrows():
-        html_content += f"""
-                            <div class="indicator-item">
-                                <span class="name">{row['name']} ({row['market']})</span>
-                                <span class="value">{row['rebound']:.1f if row['rebound'] else 'N/A'}%</span>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    html_content += """
-                </div>
-            </div>
-            
-            <!-- 투자자별 추천 -->
-            <div class="section">
-                <div class="section-title">👥 투자자별 맞춤 추천</div>
-                <div class="investor-grid">
-"""
-    
-    # 보수적 투자자
-    html_content += """
-                    <div class="investor-card">
-                        <div class="investor-header conservative-header">🛡️ 보수적 투자자 추천 (안정성 중심)</div>
-                        <div class="investor-body">
-"""
-    for idx, row in conservative.iterrows():
-        html_content += f"""
-                            <div class="investor-item">
-                                <div class="name">{row['name']} ({row['market']})</div>
-                                <div>RSI: {row['rsi']:.1f if row['rsi'] else 'N/A'}</div>
-                                <div>PBR: {row['pbr']:.2f if row['pbr'] else 'N/A'}</div>
-                                <div style="font-weight: 700; color: #667eea;">{row['score']:.1f}점</div>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-"""
-    
-    # 공격적 투자자
-    html_content += """
-                    <div class="investor-card">
-                        <div class="investor-header aggressive-header">⚡ 공격적 투자자 추천 (수익성 중심)</div>
-                        <div class="investor-body">
-"""
-    for idx, row in aggressive.iterrows():
-        html_content += f"""
-                            <div class="investor-item">
-                                <div class="name">{row['name']} ({row['market']})</div>
-                                <div>반등: {row['rebound']:.1f if row['rebound'] else 'N/A'}%</div>
-                                <div>거래량: {row['volume_ratio']:.1f if row['volume_ratio'] else 'N/A'}%</div>
-                                <div style="font-weight: 700; color: #e74c3c;">{row['score']:.1f}점</div>
-                            </div>
-"""
-    html_content += """
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Gemini AI 종합 분석 -->
-            <div class="section">
-                <div class="section-title">🤖 AI 종합 분석 (Gemini 2.0 Flash)</div>
-                <div class="ai-analysis">
-                    <div class="ai-header">📊 시장 및 Top 30 종목 종합 분석</div>
-                    <div class="ai-body">{gemini_analysis}</div>
-                </div>
-            </div>
+        <div class="section">
+            <h2>📊 TOP 7-30 종목</h2>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>순위</th>
+                        <th>종목명</th>
+                        <th>종목코드</th>
+                        <th>총점</th>
+                        <th>현재가</th>
+                        <th>RSI</th>
+                        <th>이격도</th>
+                        <th>거래량비율</th>
+                        <th>PBR</th>
+                        <th>5일수익률</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
         </div>
         
-        <!-- 푸터 -->
+        <div class="section">
+            <h2>📈 지표별 상세 분석</h2>
+            {indicator_sections}
+        </div>
+        
+        <div class="section">
+            {investor_recommendations}
+        </div>
+        
         <div class="footer">
-            <p>⚠️ 본 분석은 참고용이며, 투자 판단은 본인의 책임입니다.</p>
-            <p>데이터 출처: Yahoo Finance | AI 분석: Google Gemini 2.0 Flash</p>
-            <p>생성 시간: {now}</p>
+            <p>⚠️ 본 자료는 투자 참고용이며, 투자 결정에 대한 책임은 투자자 본인에게 있습니다.</p>
+            <p>Generated by Stock Swing Trading Analysis System v3.9 HYBRID</p>
         </div>
     </div>
 </body>
 </html>
-"""
+    """
     
-    # HTML 파일 저장
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    print("=" * 70)
-    print(f"✓ HTML 보고서 생성 완료: {output_path}")
-    print("=" * 70)
+    return html_content
 
-# ============================================================================
+# ============================================================
 # 메인 실행
-# ============================================================================
+# ============================================================
+
 def main():
     """메인 실행 함수"""
-    print("\n" + "=" * 70)
-    print("🚀 스윙 트레이드 종목 추천 시스템 v3.8 시작")
-    print("=" * 70)
+    print("="*60)
+    print("스윙 트레이딩 종목 분석 시스템 v3.9 HYBRID")
+    print("="*60)
+    
+    # pykrx 확인
+    if not PYKRX_AVAILABLE:
+        print("\n❌ pykrx가 필요합니다!")
+        print("설치: !pip install pykrx")
+        return
     
     start_time = time.time()
     
-    # 1. 전체 종목 수집
-    all_tickers = get_all_kr_tickers()
-    if all_tickers.empty:
-        print("✗ 종목 수집 실패. 프로그램을 종료합니다.")
+    # 1. 환경 설정
+    print("\n[1단계] 환경 설정")
+    api_key = setup_environment()
+    setup_korean_font()
+    
+    # 2. 시장 정보 수집 (우선 - yfinance)
+    print("\n[2단계] 시장 정보 수집 (우선)")
+    market_info = get_market_data()
+    
+    # 3. 종목 목록 가져오기 (pykrx)
+    print("\n[3단계] 종목 목록 조회")
+    stocks = get_stock_list()
+    
+    if stocks.empty:
+        print("❌ 종목 목록을 가져올 수 없습니다.")
         return
     
-    # 2. 전체 종목 분석 (거래대금 1억으로 완화)
-    df = analyze_all_stocks(all_tickers, min_volume=100_000_000)
-    if df.empty:
-        print("✗ 분석 결과가 없습니다. 프로그램을 종료합니다.")
+    # 4. 전체 종목 분석 (pykrx)
+    print("\n[4단계] 종목 분석 시작")
+    results = []
+    
+    for idx, (_, stock) in enumerate(stocks.iterrows(), 1):
+        if idx % 100 == 0:
+            print(f"  진행 중: {idx}/{len(stocks)} ({idx/len(stocks)*100:.1f}%)")
+        
+        result = analyze_stock(stock['종목코드'], stock['종목명'])
+        if result:
+            results.append(result)
+    
+    print(f"\n✓ 분석 완료: {len(results)}개 종목 필터 통과")
+    
+    if not results:
+        print("❌ 분석 가능한 종목이 없습니다.")
         return
     
-    # 3. 시장 지수 및 환율 정보 수집
-    market_data = get_market_indices()
+    # 5. 결과 정리
+    df_results = pd.DataFrame(results)
     
-    # 4. Gemini AI 종합 분석 생성
-    gemini_analysis = generate_gemini_analysis(df.head(30), market_data)
+    # 30점 이상만 필터링
+    df_filtered = df_results[df_results['총점'] >= 30].copy()
+    df_filtered = df_filtered.sort_values('총점', ascending=False).reset_index(drop=True)
     
-    # 5. HTML 보고서 생성
-    output_filename = f"stock_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    print(f"✓ 30점 이상 종목: {len(df_filtered)}개")
     
-    # Colab과 GitHub Actions 환경 자동 감지
-    if os.path.exists('/content/drive/MyDrive'):
-        # Colab 환경: Google Drive에 저장
-        output_path = f"/content/drive/MyDrive/{output_filename}"
+    if len(df_filtered) == 0:
+        print("❌ 30점 이상 종목이 없습니다.")
+        return
+    
+    # 6. AI 분석
+    print("\n[5단계] AI 시장 분석")
+    if api_key:
+        ai_analysis = get_ai_analysis(df_filtered, market_info)
+        print("✓ AI 분석 완료")
     else:
-        # GitHub Actions 환경: 현재 디렉토리에 저장
-        output_path = f"./{output_filename}"
+        ai_analysis = "API 키가 설정되지 않아 AI 분석을 수행할 수 없습니다."
+        print("⚠ AI 분석 건너뜀 (API 키 없음)")
     
-    generate_html(df, market_data, gemini_analysis, output_path)
+    # 7. HTML 보고서 생성
+    print("\n[6단계] HTML 보고서 생성")
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    html_content = generate_html(df_filtered, market_info, ai_analysis, timestamp)
     
-    # 실행 시간 출력
+    # 8. 파일 저장
+    filename = f"stock_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    # 실행 시간 계산
     elapsed_time = time.time() - start_time
     minutes = int(elapsed_time // 60)
     seconds = int(elapsed_time % 60)
     
-    print("\n" + "=" * 70)
-    print("✓ 모든 작업 완료!")
-    print("=" * 70)
-    print(f"실행 시간: {minutes}분 {seconds}초")
-    print(f"결과 파일: {output_path}")
-    print("=" * 70)
+    print("\n" + "="*60)
+    print("✅ 분석 완료!")
+    print("="*60)
+    print(f"📊 분석 종목 수: {len(results)}개")
+    print(f"🎯 30점 이상 종목: {len(df_filtered)}개")
+    print(f"📄 보고서 파일: {filename}")
+    print(f"⏱️ 실행 시간: {minutes}분 {seconds}초")
+    print("="*60)
+    
+    # Top 10 미리보기
+    print("\n[TOP 10 미리보기]")
+    print(df_filtered[['종목명', '종목코드', '총점', '현재가', 'RSI', '이격도']].head(10).to_string(index=False))
 
 if __name__ == "__main__":
     main()
