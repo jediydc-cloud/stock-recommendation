@@ -107,8 +107,8 @@ def get_all_kr_tickers():
         kospi_df = pd.read_html(kospi_url, encoding='cp949')[0]
         kosdaq_df = pd.read_html(kosdaq_url, encoding='cp949')[0]
         
-        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: f"{x:06d}.KS")
-        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: f"{x:06d}.KQ")
+        kospi_df['ticker'] = kospi_df['종목코드'].apply(lambda x: f"{str(x).zfill(6)}.KS")
+        kosdaq_df['ticker'] = kosdaq_df['종목코드'].apply(lambda x: f"{str(x).zfill(6)}.KQ")
         
         kospi_df['market'] = 'KOSPI'
         kosdaq_df['market'] = 'KOSDAQ'
@@ -1528,7 +1528,14 @@ def main():
     
     # 5. HTML 보고서 생성
     output_filename = f"stock_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-    output_path = f"/content/drive/MyDrive/{output_filename}"
+    
+    # Colab과 GitHub Actions 환경 자동 감지
+    if os.path.exists('/content/drive/MyDrive'):
+        # Colab 환경: Google Drive에 저장
+        output_path = f"/content/drive/MyDrive/{output_filename}"
+    else:
+        # GitHub Actions 환경: 현재 디렉토리에 저장
+        output_path = f"./{output_filename}"
     
     generate_html(df, market_data, gemini_analysis, output_path)
     
