@@ -19,7 +19,7 @@ import base64
 import warnings
 import time
 import logging
-from google.colab import userdata
+import os
 import google.generativeai as genai
 
 # pykrx 추가
@@ -39,18 +39,33 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 # ============================================================
 
 def setup_environment():
-    """환경 설정 및 API 키 로드"""
+    """환경 설정 및 API 키 로드 (Colab + GitHub 지원)"""
+    # Colab 환경 체크
     try:
+        from google.colab import userdata
         api_key = userdata.get('swingTrading')
-        if not api_key:
-            raise ValueError("❌ Colab Secrets에 'swingTrading' API 키가 없습니다")
-        
-        genai.configure(api_key=api_key)
-        print("✓ Colab Secrets에서 API 키 로드 완료")
-        return api_key
+        if api_key:
+            genai.configure(api_key=api_key)
+            print("✓ Colab Secrets에서 API 키 로드 완료")
+            return api_key
+    except ImportError:
+        pass  # Colab 아님
     except Exception as e:
-        print(f"⚠ API 키 로드 실패: {e}")
-        return None
+        print(f"⚠ Colab Secrets 로드 실패: {e}")
+    
+    # GitHub/로컬 환경 체크
+    api_key = os.environ.get('SWING_TRADING_API_KEY')
+    if api_key:
+        genai.configure(api_key=api_key)
+        print("✓ GitHub Secrets에서 API 키 로드 완료")
+        return api_key
+    
+    # API 키 없음
+    raise ValueError(
+        "❌ API 키를 찾을 수 없습니다!\n"
+        "Colab: 좌측 🔑 아이콘에서 'swingTrading' 설정\n"
+        "GitHub: Settings → Secrets → 'SWING_TRADING_API_KEY' 설정"
+    )
 
 def setup_korean_font():
     """한글 폰트 설정"""
