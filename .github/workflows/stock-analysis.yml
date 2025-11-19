@@ -23,11 +23,11 @@ jobs:
         with:
           python-version: '3.10'
       
-      # 3. 의존성 패키지 설치
+      # 3. 의존성 패키지 설치 (pykrx 추가)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance pandas matplotlib google-generativeai
+          pip install pykrx yfinance pandas matplotlib google-generativeai requests beautifulsoup4 Pillow
       
       # 4. 한글 폰트 설치 (차트 생성용)
       - name: Install Korean fonts
@@ -39,9 +39,9 @@ jobs:
       # 5. Python 스크립트 실행 (환경변수 전달)
       - name: Run stock analysis
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          swingTrading: ${{ secrets.swingTrading }}
         run: |
-          python stock_swing_trading_v3.8.py
+          python stock_swing_trading.py
       
       # 6. 결과 파일을 저장소에 커밋
       - name: Commit and push results
