@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v4.2
+스윙 트레이딩 종목 추천 시스템 v4.2.1
+- v4.2 버그 수정: 인코딩 에러 + Gemini quota 해결
 - DART + KRX 기반 정확한 펀더멘털 계산
-- 5개 지표별 TOP5 카드 모두 출력 (복원)
-- 투자자 유형 3가지 모두 출력 (복원)
-- AI 분석 안정화 (TOP 6만 전송, 오류 처리 강화)
+- 5개 지표별 TOP5 카드 모두 출력
+- 투자자 유형 3가지 모두 출력
+- AI 분석 안정화 (gemini-1.5-flash)
 """
 
 import yfinance as yf
@@ -246,7 +247,8 @@ class KRXData:
             response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
             
-            df = pd.read_html(response.text, header=0)[0]
+            # v4.2.1 FIX: EUC-KR 인코딩 명시
+            df = pd.read_html(response.content, header=0, encoding='euc-kr')[0]
             
             for _, row in df.iterrows():
                 code = str(row['종목코드']).zfill(6)
@@ -288,8 +290,13 @@ def get_kospi_kosdaq_list():
     url_kosdaq = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=kosdaqMkt"
     
     try:
-        kospi = pd.read_html(url_kospi, header=0)[0]
-        kosdaq = pd.read_html(url_kosdaq, header=0)[0]
+        # v4.2.1 FIX: EUC-KR 인코딩 명시
+        kospi_response = requests.get(url_kospi, timeout=30)
+        kosdaq_response = requests.get(url_kosdaq, timeout=30)
+        
+        kospi = pd.read_html(kospi_response.content, header=0, encoding='euc-kr')[0]
+        kosdaq = pd.read_html(kosdaq_response.content, header=0, encoding='euc-kr')[0]
+        
         all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
         all_stocks['종목코드'] = all_stocks['종목코드'].astype(str).str.zfill(6)
         return all_stocks[['회사명', '종목코드']].values.tolist()
@@ -450,16 +457,18 @@ def get_market_data():
 
 def get_gemini_analysis(top_stocks: List[Dict]) -> str:
     """
-    Gemini AI 분석 (v4.2: TOP 6만 전송, 오류 처리 강화)
+    Gemini AI 분석 (v4.2.1: gemini-1.5-flash로 변경)
     """
     try:
         api_key = userdata.get('swingTrading')
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        # v4.2.1 FIX: 안정적인 모델로 변경
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
-        # v4.2: TOP 6만 전송
+        # TOP 6만 전송
         analysis_data = []
-        for stock in top_stocks[:6]:  # TOP 30 → TOP 6
+        for stock in top_stocks[:6]:
             analysis_data.append({
                 '종목명': stock['name'],
                 '현재가': f"{stock['price']:,.0f}원",
@@ -496,7 +505,7 @@ def get_gemini_analysis(top_stocks: List[Dict]) -> str:
 
     except Exception as e:
         logging.warning(f"Gemini API 오류: {e}")
-        # v4.2: Fallback 메시지
+        # Fallback 메시지
         return """
         <div style='text-align:center; padding:20px; color:#888;'>
             ⚠️ 데이터가 부족하여 AI 분석을 생략합니다
@@ -780,7 +789,7 @@ def generate_html(top_stocks: List[Dict], market_data: Dict, ai_analysis: str, t
     <head>
         <meta charset='UTF-8'>
         <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-        <title>스윙 트레이딩 종목 추천 v4.2 - {timestamp}</title>
+        <title>스윙 트레이딩 종목 추천 v4.2.1 - {timestamp}</title>
         <style>
             body {{
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -854,7 +863,7 @@ def generate_html(top_stocks: List[Dict], market_data: Dict, ai_analysis: str, t
     </head>
     <body>
         <div class='container'>
-            <h1>📊 스윙 트레이딩 종목 추천 리포트 v4.2</h1>
+            <h1>📊 스윙 트레이딩 종목 추천 리포트 v4.2.1</h1>
             <div class='timestamp'>생성 시간: {timestamp}</div>
             
             <div class='market-overview'>
@@ -936,7 +945,7 @@ def generate_html(top_stocks: List[Dict], market_data: Dict, ai_analysis: str, t
 
 def main():
     """메인 실행 함수"""
-    logging.info("=== 스윙 트레이딩 분석 시작 v4.2 ===")
+    logging.info("=== 스윙 트레이딩 분석 시작 v4.2.1 ===")
     
     # API 키 로드
     dart_api_key = userdata.get('DART_API')
@@ -994,7 +1003,7 @@ def main():
     # 시장 데이터 및 AI 분석
     market_data = get_market_data()
     
-    # v4.2: AI 분석 안정화
+    # AI 분석 안정화
     logging.info("Gemini AI 분석 중 (TOP 6)...")
     ai_analysis = get_gemini_analysis(top_stocks)
     
@@ -1003,7 +1012,7 @@ def main():
     html_content = generate_html(top_stocks, market_data, ai_analysis, timestamp)
     
     # 파일 저장
-    filename = f"stock_result_v4.2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    filename = f"stock_result_v4.2.1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(html_content)
     
