@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install lxml pykrx yfinance pandas matplotlib google-generativeai requests beautifulsoup4 Pillow
+          pip install lxml pykrx pytz yfinance pandas matplotlib google-generativeai requests beautifulsoup4 Pillow
       
       # 4. 한글 폰트 설치 (차트 생성용)
       - name: Install Korean fonts
@@ -39,6 +39,7 @@ jobs:
       # 5. Python 스크립트 실행 (환경변수 전달)
       - name: Run stock analysis
         env:
+          DART_API: ${{ secrets.DART_API }}
           swingTrading: ${{ secrets.swingTrading }}
         run: |
           python stock_swing_trading.py
