@@ -43,11 +43,30 @@ jobs:
         run: |
           python stock_swing_trading.py
       
-      # 6. 결과 파일을 저장소에 커밋
+      # 6. 이전 HTML 파일 정리 (최신 1개만 유지)
+      - name: Clean old HTML files
+        run: |
+          # 생성된 HTML 파일이 있는지 확인
+          if ls stock_result_*.html 1> /dev/null 2>&1; then
+            echo "📂 현재 HTML 파일 목록:"
+            ls -lht stock_result_*.html
+            
+            # 최신 파일 1개만 남기고 나머지 삭제
+            echo "🧹 오래된 파일 삭제 중..."
+            ls -t stock_result_*.html | tail -n +2 | xargs -r rm -v
+            
+            echo "✅ 정리 완료! 최신 파일만 유지:"
+            ls -lh stock_result_*.html
+          else
+            echo "⚠️ HTML 파일이 없습니다."
+          fi
+      
+      # 7. 결과 파일을 저장소에 커밋
       - name: Commit and push results
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add *.html
+          git add -u  # 삭제된 파일도 스테이징
           git diff --quiet && git diff --staged --quiet || git commit -m "Auto update: Stock analysis $(date +'%Y-%m-%d %H:%M:%S')"
           git push
