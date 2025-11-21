@@ -16,7 +16,7 @@ import logging
 import json
 from typing import Dict, List, Optional, Tuple
 import google.generativeai as genai
-from google.colab import userdata
+import os
 from multiprocessing import Pool
 import warnings
 warnings.filterwarnings('ignore')
@@ -438,7 +438,7 @@ def get_market_data():
 
 def get_gemini_analysis(top_stocks):
     try:
-        api_key = userdata.get('swingTrading')
+        api_key = os.environ.get('swingTrading')
         genai.configure(api_key=api_key)
         
         # v4.2.9 FIX: gemini-2.5-flash 사용 (1.5는 지원 종료, 2.5가 현재 최신 안정 버전)
@@ -577,7 +577,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
 def main():
     logging.info("=== v4.2.10 FINAL 시작 ===")
     
-    dart_key = userdata.get('DART_API')
+    dart_key = os.environ.get('DART_API')
     cache = CacheManager()
     krx = KRXData(cache)
     
