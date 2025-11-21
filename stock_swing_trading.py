@@ -608,7 +608,8 @@ def main():
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     html = generate_html(top_stocks, market_data, ai_analysis, timestamp)
     
-    filename = f"stock_result_v4.2.10_FINAL_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    filename = f"stock_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(html)
     
