@@ -43,20 +43,27 @@ jobs:
         run: |
           python stock_swing_trading.py
       
-      # 6. 이전 HTML 파일 정리 (최신 1개만 유지)
-      - name: Clean old HTML files
+      # 6. index.html 생성 및 이전 파일 정리
+      - name: Clean old HTML files and create index
         run: |
-          # 생성된 HTML 파일이 있는지 확인
           if ls stock_result_*.html 1> /dev/null 2>&1; then
             echo "📂 현재 HTML 파일 목록:"
             ls -lht stock_result_*.html
+            
+            # 최신 파일 찾기
+            LATEST=$(ls -t stock_result_*.html | head -n 1)
+            echo "✅ 최신 파일: $LATEST"
+            
+            # index.html로 복사 (GitHub Pages 메인 페이지)
+            cp "$LATEST" index.html
+            echo "📝 index.html 생성 완료"
             
             # 최신 파일 1개만 남기고 나머지 삭제
             echo "🧹 오래된 파일 삭제 중..."
             ls -t stock_result_*.html | tail -n +2 | xargs -r rm -v
             
-            echo "✅ 정리 완료! 최신 파일만 유지:"
-            ls -lh stock_result_*.html
+            echo "✅ 정리 완료! 최신 파일 + index.html:"
+            ls -lh stock_result_*.html index.html
           else
             echo "⚠️ HTML 파일이 없습니다."
           fi
