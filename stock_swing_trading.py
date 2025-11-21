@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v4.2.13
+스윙 트레이딩 종목 추천 시스템 v4.2.14
 - v4.2.11: DART corp_code 매핑 개선 + 위험도 평가 시스템 추가 + 보수적 투자자 로직 보정
 - v4.2.12: 🔧 CRITICAL FIX - DARTCorpCodeMapper를 main()에서 한 번만 초기화하여 멀티프로세싱 에러 해결
 - v4.2.13: 🕐 TIMEZONE FIX - 한국 시간(KST, UTC+9) 표시 수정
+- v4.2.14: 🐛 DART API URL FIX - corpCode.xml 엔드포인트 경로 수정 (/api/ 제거)
 """
 
 import yfinance as yf
@@ -164,7 +165,7 @@ class DARTCorpCodeMapper:
     def __init__(self, api_key: str, cache_manager: CacheManager):
         self.api_key = api_key
         self.cache = cache_manager
-        self.base_url = "https://opendart.fss.or.kr/api/corpCode.xml"
+        self.base_url = "https://opendart.fss.or.kr/corpCode.xml"  # v4.2.14: /api/ 제거
         
         # 캐시가 유효하지 않으면 다운로드
         if not self.cache.check_corp_map_valid(days=30):
@@ -799,12 +800,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
     <meta http-equiv='Pragma' content='no-cache'>
     <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v4.2.13 - {timestamp}</title>
+    <title>스윙 트레이딩 v4.2.14 - {timestamp}</title>
     <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v4.2.13</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v4.2.14</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
         <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_str}</div><div style='color:{kospi_color};'>{kospi_change_str}</div></div>
@@ -835,13 +836,108 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     </table>
     <h2 style='color:#2c3e50;margin:30px 0 20px;'>📈 지표별 TOP 5</h2>{indicator_cards}
     <h2 style='color:#2c3e50;margin:30px 0 20px;'>👥 투자자 유형별 추천</h2>{investor_cards}
+    
+    <div style='background:white;padding:30px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-top:30px;'>
+        <h2 style='color:#2c3e50;margin:0 0 20px 0;border-bottom:3px solid #3498db;padding-bottom:10px;'>📚 주요 지표 설명</h2>
+        
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:30px;'>
+            <div style='background:#f8f9fa;padding:20px;border-radius:8px;border-left:4px solid #e74c3c;'>
+                <h3 style='color:#e74c3c;margin:0 0 10px 0;'>📉 RSI (상대강도지수)</h3>
+                <p style='margin:0;color:#2c3e50;line-height:1.6;'>
+                    <strong>의미:</strong> 과매수/과매도 판단 지표<br>
+                    <strong>30 이하:</strong> 과매도 구간 (매수 기회)<br>
+                    <strong>70 이상:</strong> 과매수 구간 (매도 고려)<br>
+                    <strong>활용:</strong> 단기 반등 타이밍 포착
+                </p>
+            </div>
+            
+            <div style='background:#f8f9fa;padding:20px;border-radius:8px;border-left:4px solid #e67e22;'>
+                <h3 style='color:#e67e22;margin:0 0 10px 0;'>📊 이격도</h3>
+                <p style='margin:0;color:#2c3e50;line-height:1.6;'>
+                    <strong>의미:</strong> 현재가와 이동평균선의 괴리율<br>
+                    <strong>95% 이하:</strong> 저평가 구간 (매수 기회)<br>
+                    <strong>105% 이상:</strong> 고평가 구간 (주의)<br>
+                    <strong>활용:</strong> 평균 회귀 매매 전략
+                </p>
+            </div>
+            
+            <div style='background:#f8f9fa;padding:20px;border-radius:8px;border-left:4px solid #3498db;'>
+                <h3 style='color:#3498db;margin:0 0 10px 0;'>💎 PBR (주가순자산비율)</h3>
+                <p style='margin:0;color:#2c3e50;line-height:1.6;'>
+                    <strong>의미:</strong> 주가 ÷ 주당순자산 (BPS)<br>
+                    <strong>1.0 미만:</strong> 저평가 (청산가치 이하)<br>
+                    <strong>2.0 이상:</strong> 고평가 (성장주 특성)<br>
+                    <strong>활용:</strong> 가치주 발굴
+                </p>
+            </div>
+            
+            <div style='background:#f8f9fa;padding:20px;border-radius:8px;border-left:4px solid #9b59b6;'>
+                <h3 style='color:#9b59b6;margin:0 0 10px 0;'>💰 PER (주가수익비율)</h3>
+                <p style='margin:0;color:#2c3e50;line-height:1.6;'>
+                    <strong>의미:</strong> 주가 ÷ 주당순이익 (EPS)<br>
+                    <strong>10 이하:</strong> 저평가 (수익성 대비 저가)<br>
+                    <strong>30 이상:</strong> 고평가 (성장 기대 반영)<br>
+                    <strong>활용:</strong> 수익성 대비 가격 평가
+                </p>
+            </div>
+            
+            <div style='background:#f8f9fa;padding:20px;border-radius:8px;border-left:4px solid #27ae60;'>
+                <h3 style='color:#27ae60;margin:0 0 10px 0;'>📈 ROE (자기자본이익률)</h3>
+                <p style='margin:0;color:#2c3e50;line-height:1.6;'>
+                    <strong>의미:</strong> (순이익 ÷ 자기자본) × 100<br>
+                    <strong>10% 이상:</strong> 우량 기업<br>
+                    <strong>15% 이상:</strong> 초우량 기업<br>
+                    <strong>활용:</strong> 경영 효율성 평가
+                </p>
+            </div>
+            
+            <div style='background:#f8f9fa;padding:20px;border-radius:8px;border-left:4px solid #f39c12;'>
+                <h3 style='color:#f39c12;margin:0 0 10px 0;'>⚡ 거래량 비율</h3>
+                <p style='margin:0;color:#2c3e50;line-height:1.6;'>
+                    <strong>의미:</strong> 당일 거래량 ÷ 평균 거래량<br>
+                    <strong>1.5배 이상:</strong> 관심 증가 (매수세 유입)<br>
+                    <strong>3.0배 이상:</strong> 급등락 주의 (테마성)<br>
+                    <strong>활용:</strong> 시장 관심도 측정
+                </p>
+            </div>
+        </div>
+        
+        <div style='background:#fff3cd;border:2px solid #ffc107;border-radius:8px;padding:20px;margin-bottom:20px;'>
+            <h3 style='color:#856404;margin:0 0 10px 0;'>🚨 위험도 평가 기준</h3>
+            <div style='color:#2c3e50;line-height:1.8;'>
+                <p style='margin:5px 0;'><strong style='color:#27ae60;'>✅ 안정 (0-29점):</strong> 흑자 기업, 정상 거래, 적정 밸류에이션</p>
+                <p style='margin:5px 0;'><strong style='color:#7f8c8d;'>⚠️ 보통 (30-69점):</strong> 경미한 적자 또는 단기 변동성 존재</p>
+                <p style='margin:5px 0;'><strong style='color:#e74c3c;'>🚨 고위험 (70점 이상):</strong> 거래정지, 관리종목, 자본잠식, 심각한 적자</p>
+            </div>
+        </div>
+        
+        <div style='background:#f8d7da;border:2px solid #dc3545;border-radius:8px;padding:25px;'>
+            <h3 style='color:#721c24;margin:0 0 15px 0;'>⚠️ 투자 유의사항</h3>
+            <div style='color:#2c3e50;line-height:1.8;font-size:14px;'>
+                <p style='margin:10px 0;'>• 본 분석은 <strong>참고 자료</strong>일 뿐이며, <strong>투자 권유가 아닙니다</strong>.</p>
+                <p style='margin:10px 0;'>• 모든 투자 결정과 그에 따른 <strong>책임은 투자자 본인</strong>에게 있습니다.</p>
+                <p style='margin:10px 0;'>• 과거 데이터 기반 분석이므로 <strong>미래 수익을 보장하지 않습니다</strong>.</p>
+                <p style='margin:10px 0;'>• 위험도가 높은 종목은 <strong>손절 라인 설정 필수</strong>입니다.</p>
+                <p style='margin:10px 0;'>• <strong>분산 투자</strong>를 통해 리스크를 관리하시기 바랍니다.</p>
+                <p style='margin:10px 0;'>• 재무제표와 공시자료를 반드시 <strong>직접 확인</strong>하시기 바랍니다.</p>
+                <p style='margin:10px 0;'>• 단기 스윙 트레이딩은 <strong>고위험 투자 전략</strong>임을 인지하시기 바랍니다.</p>
+            </div>
+        </div>
+        
+        <div style='text-align:center;margin-top:20px;padding-top:20px;border-top:1px solid #dee2e6;color:#7f8c8d;font-size:13px;'>
+            <p style='margin:5px 0;'>📊 데이터 출처: DART 전자공시, KRX, yfinance</p>
+            <p style='margin:5px 0;'>🤖 AI 분석: Google Gemini 2.5 Flash</p>
+            <p style='margin:5px 0;'>⚡ 생성 시간: {timestamp} (KST)</p>
+            <p style='margin:5px 0;'>💻 버전: v4.2.14 - 스윙 트레이딩 종목 추천 시스템</p>
+        </div>
+    </div>
 </div>
 </body>
 </html>"""
     return html
 
 def main():
-    logging.info("=== v4.2.12 시작 ===")
+    logging.info("=== v4.2.14 시작 ===")
     
     dart_key = os.environ.get('DART_API')
     cache = CacheManager()
