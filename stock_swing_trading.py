@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v4.2.14
+스윙 트레이딩 종목 추천 시스템 v4.2.15
 - v4.2.11: DART corp_code 매핑 개선 + 위험도 평가 시스템 추가 + 보수적 투자자 로직 보정
 - v4.2.12: 🔧 CRITICAL FIX - DARTCorpCodeMapper를 main()에서 한 번만 초기화하여 멀티프로세싱 에러 해결
 - v4.2.13: 🕐 TIMEZONE FIX - 한국 시간(KST, UTC+9) 표시 수정
 - v4.2.14: 🐛 DART API URL FIX - corpCode.xml 엔드포인트 경로 수정 (/api/ 제거)
+- v4.2.15: 💱 EXCHANGE RATE CACHE - 환율 데이터 캐싱으로 yfinance rate limit 회피
 """
 
 import yfinance as yf
@@ -34,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ============================
-# 1. SQLite 캐시 관리자 (v4.2.11: dart_corp_map 테이블 추가)
+# 1. SQLite 캐시 관리자 (v4.2.15: exchange_cache 테이블 추가)
 # ============================
 class CacheManager:
     def __init__(self, db_path: str = 'financials.db'):
@@ -65,6 +66,16 @@ class CacheManager:
                 stock_code TEXT PRIMARY KEY,
                 corp_code TEXT,
                 corp_name TEXT,
+                cached_at TEXT
+            )
+        ''')
+        # v4.2.15: 환율 캐시 테이블 추가
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS exchange_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usd REAL,
+                eur REAL,
+                jpy REAL,
                 cached_at TEXT
             )
         ''')
@@ -155,6 +166,29 @@ class CacheManager:
         results = cursor.fetchall()
         conn.close()
         return {stock_code: corp_code for stock_code, corp_code in results}
+
+    # v4.2.15: 환율 캐시 관련 메서드 추가
+    def get_exchange_cache(self, hours: int = 24):
+        """환율 캐시 조회 (24시간)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        kst = pytz.timezone('Asia/Seoul')
+        cutoff_date = (datetime.now(kst) - timedelta(hours=hours)).isoformat()
+        cursor.execute('SELECT usd, eur, jpy FROM exchange_cache WHERE cached_at > ? ORDER BY cached_at DESC LIMIT 1',
+                      (cutoff_date,))
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def set_exchange_cache(self, usd: float, eur: float, jpy: float):
+        """환율 캐시 저장"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        kst = pytz.timezone('Asia/Seoul')
+        cursor.execute('INSERT INTO exchange_cache (usd, eur, jpy, cached_at) VALUES (?, ?, ?, ?)',
+                      (usd, eur, jpy, datetime.now(kst).isoformat()))
+        conn.commit()
+        conn.close()
 
 # ============================
 # 2. DART corp_code 매핑 (v4.2.11 신규 / v4.2.12 최적화)
@@ -547,7 +581,7 @@ def analyze_stock_worker(args):
         signal.alarm(0)
 
 def get_market_data():
-    """v4.2.10: pykrx 우선 사용"""
+    """v4.2.15: 환율 캐싱 적용"""
     result = {'kospi': None, 'kospi_change': None, 'kosdaq': None, 'kosdaq_change': None, 'usd': None, 'eur': None, 'jpy': None}
     
     try:
@@ -593,15 +627,35 @@ def get_market_data():
     except Exception as e:
         logging.warning(f"pykrx 실패: {e}")
     
+    # v4.2.15: 환율 캐시 조회
+    cache = CacheManager()
+    cached_rates = cache.get_exchange_cache(hours=24)
+    
+    if cached_rates:
+        result['usd'], result['eur'], result['jpy'] = cached_rates
+        logging.info(f"✅ 환율 캐시 사용: USD={result['usd']:.2f}, EUR={result['eur']:.2f}, JPY={result['jpy']:.2f}")
+        return result
+    
+    # 캐시 없으면 조회
+    logging.info("⏳ 환율 데이터 조회 중 (캐시 없음)...")
     try:
-        usd = yf.Ticker("KRW=X").history(period='5d')
+        usd = yf.Ticker("KRW=X").history(period='1d')
         result['usd'] = usd['Close'].iloc[-1] if not usd.empty else None
         
-        eur = yf.Ticker("EURKRW=X").history(period='5d')
+        time.sleep(0.5)  # rate limit 회피
+        eur = yf.Ticker("EURKRW=X").history(period='1d')
         result['eur'] = eur['Close'].iloc[-1] if not eur.empty else None
         
-        jpy = yf.Ticker("JPYKRW=X").history(period='5d')
+        time.sleep(0.5)
+        jpy = yf.Ticker("JPYKRW=X").history(period='1d')
         result['jpy'] = jpy['Close'].iloc[-1] if not jpy.empty else None
+        
+        # 성공하면 캐시 저장
+        if result['usd']:
+            cache.set_exchange_cache(result['usd'], result['eur'] or 0, result['jpy'] or 0)
+            logging.info(f"✅ 환율 조회 성공 & 캐시 저장: USD={result['usd']:.2f}")
+        else:
+            logging.warning("환율 조회 실패: USD 데이터 없음")
     except Exception as e:
         logging.warning(f"환율 실패: {e}")
     
@@ -800,12 +854,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
     <meta http-equiv='Pragma' content='no-cache'>
     <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v4.2.14 - {timestamp}</title>
+    <title>스윙 트레이딩 v4.2.15 - {timestamp}</title>
     <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v4.2.14</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v4.2.15</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
         <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_str}</div><div style='color:{kospi_color};'>{kospi_change_str}</div></div>
@@ -928,7 +982,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             <p style='margin:5px 0;'>📊 데이터 출처: DART 전자공시, KRX, yfinance</p>
             <p style='margin:5px 0;'>🤖 AI 분석: Google Gemini 2.5 Flash</p>
             <p style='margin:5px 0;'>⚡ 생성 시간: {timestamp} (KST)</p>
-            <p style='margin:5px 0;'>💻 버전: v4.2.14 - 스윙 트레이딩 종목 추천 시스템</p>
+            <p style='margin:5px 0;'>💻 버전: v4.2.15 - 스윙 트레이딩 종목 추천 시스템 (환율 캐싱 적용)</p>
         </div>
     </div>
 </div>
@@ -937,7 +991,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     return html
 
 def main():
-    logging.info("=== v4.2.14 시작 ===")
+    logging.info("=== v4.2.15 시작 ===")
     
     dart_key = os.environ.get('DART_API')
     cache = CacheManager()
