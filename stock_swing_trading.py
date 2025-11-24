@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v4.2.16
+스윙 트레이딩 종목 추천 시스템 v4.2.17
 - v4.2.11: DART corp_code 매핑 개선 + 위험도 평가 시스템 추가 + 보수적 투자자 로직 보정
 - v4.2.12: 🔧 CRITICAL FIX - DARTCorpCodeMapper를 main()에서 한 번만 초기화하여 멀티프로세싱 에러 해결
 - v4.2.13: 🕐 TIMEZONE FIX - 한국 시간(KST, UTC+9) 표시 수정
 - v4.2.14: 🐛 DART API URL FIX - corpCode.xml 엔드포인트 경로 수정 (/api/ 제거)
 - v4.2.15: 💱 EXCHANGE RATE CACHE - 환율 데이터 캐싱으로 yfinance rate limit 회피
 - v4.2.16: 🚀 EXCHANGE RATE PRIORITY - 환율 조회를 맨 앞으로 이동하여 rate limit 전에 확보
+- v4.2.17: 📊 HTML SECTIONS RESTORE - 투자자 유형별 추천 + 지표별 TOP5 섹션 복구
 """
 
 import yfinance as yf
@@ -628,7 +629,8 @@ def analyze_stock_worker(args):
             'bps': bps_value, 'eps': eps_value,
             'chart_data': chart_data,
             'risk_score': risk_score,  # v4.2.11
-            'risk_level': risk_level   # v4.2.11
+            'risk_level': risk_level,   # v4.2.11
+            'rebound_strength': rebound_strength  # v4.2.17: 반등 강도 추가
         }
     except Exception:
         return None
@@ -735,7 +737,11 @@ def safe_format(value, fmt, default='N/A'):
         return default
 
 def generate_html(top_stocks, market_data, ai_analysis, timestamp):
-    """HTML 보고서 생성 (v4.2.11: 위험도 표시 추가)"""
+    """
+    HTML 보고서 생성
+    v4.2.11: 위험도 표시 추가
+    v4.2.17: 투자자 유형별 추천 + 지표별 TOP5 섹션 복구
+    """
     
     # v4.2.11: 위험도 배지 색상
     def get_risk_badge(risk_level):
@@ -823,6 +829,79 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{pbr_display}</td>
         </tr>"""
     
+    # v4.2.17: 투자자 유형별 추천 섹션
+    aggressive_stocks = sorted([s for s in top_stocks if s.get('risk_level') != '고위험'], 
+                               key=lambda x: -x['score'])[:5]
+    balanced_stocks = sorted([s for s in top_stocks if s.get('risk_level') == '보통'], 
+                            key=lambda x: -x['score'])[:5]
+    conservative_stocks = sorted([s for s in top_stocks if s.get('risk_level') == '안정'], 
+                                 key=lambda x: -x['score'])[:5]
+    
+    def make_investor_card(title, description, stocks, icon, color):
+        items = ""
+        for i, s in enumerate(stocks, 1):
+            items += f"""<div style='padding:10px;background:#f8f9fa;margin:8px 0;border-radius:5px;'>
+                <strong>{i}. {s['name']}</strong> ({s['code']})<br>
+                <span style='color:#555;font-size:13px;'>점수: {s['score']}점 | RSI: {s['rsi']:.1f} | 이격도: {s['disparity']:.1f}%</span>
+            </div>"""
+        
+        return f"""
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border-left:5px solid {color};'>
+            <h3 style='margin:0 0 10px 0;color:{color};'>{icon} {title}</h3>
+            <p style='color:#555;margin:0 0 15px 0;'>{description}</p>
+            {items}
+        </div>
+        """
+    
+    investor_type_section = f"""
+    <h2 style='color:#2c3e50;margin:40px 0 20px;'>👥 투자자 유형별 추천</h2>
+    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:20px;margin-bottom:30px;'>
+        {make_investor_card('공격적 투자자', '고수익 추구, 높은 변동성 감내 가능', aggressive_stocks, '🚀', '#e74c3c')}
+        {make_investor_card('균형잡힌 투자자', '안정성과 수익성의 조화', balanced_stocks, '⚖️', '#3498db')}
+        {make_investor_card('보수적 투자자', '안정성 우선, 리스크 최소화', conservative_stocks, '🛡️', '#27ae60')}
+    </div>
+    """
+    
+    # v4.2.17: 지표별 TOP5 섹션
+    rsi_top5 = sorted(top_stocks, key=lambda x: x['rsi'])[:5]
+    disparity_top5 = sorted(top_stocks, key=lambda x: x['disparity'])[:5]
+    volume_top5 = sorted(top_stocks, key=lambda x: -x['volume_ratio'])[:5]
+    rebound_top5 = sorted(top_stocks, key=lambda x: -x.get('rebound_strength', 0))[:5]
+    pbr_top5 = sorted([s for s in top_stocks if s.get('pbr')], key=lambda x: x['pbr'])[:5]
+    
+    def make_indicator_list(stocks, show_value_func):
+        items = ""
+        for i, s in enumerate(stocks, 1):
+            value_str = show_value_func(s)
+            items += f"<li><strong>{s['name']}</strong> ({s['code']}) - {value_str}</li>"
+        return f"<ul style='margin:10px 0;padding-left:20px;line-height:1.8;'>{items}</ul>"
+    
+    indicator_top5_section = f"""
+    <h2 style='color:#2c3e50;margin:40px 0 20px;'>📈 지표별 TOP 5</h2>
+    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:30px;'>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
+            <h3 style='color:#e74c3c;margin:0 0 15px 0;'>📉 RSI 과매도</h3>
+            {make_indicator_list(rsi_top5, lambda s: f"RSI {s['rsi']:.1f}")}
+        </div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
+            <h3 style='color:#e67e22;margin:0 0 15px 0;'>📊 이격도 하락</h3>
+            {make_indicator_list(disparity_top5, lambda s: f"이격도 {s['disparity']:.1f}%")}
+        </div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
+            <h3 style='color:#27ae60;margin:0 0 15px 0;'>📦 거래량 급증</h3>
+            {make_indicator_list(volume_top5, lambda s: f"거래량 {s['volume_ratio']:.2f}배")}
+        </div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
+            <h3 style='color:#9b59b6;margin:0 0 15px 0;'>🎯 반등 강도</h3>
+            {make_indicator_list(rebound_top5, lambda s: f"반등 {s.get('rebound_strength', 0):.1f}%")}
+        </div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
+            <h3 style='color:#3498db;margin:0 0 15px 0;'>💎 저PBR 가치주</h3>
+            {make_indicator_list(pbr_top5, lambda s: f"PBR {s['pbr']:.2f}")}
+        </div>
+    </div>
+    """
+    
     usd_display = f"{market_data['usd']:,.2f}" if market_data.get('usd') else "N/A"
     eur_display = f"{market_data['eur']:,.2f}" if market_data.get('eur') else "N/A"
     jpy_display = f"{market_data['jpy']:,.2f}" if market_data.get('jpy') else "N/A"
@@ -836,7 +915,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     kospi_change_text = f"{market_data.get('kospi_change', 0):+.2f}%"
     kosdaq_change_text = f"{market_data.get('kosdaq_change', 0):+.2f}%"
     
-    # v4.2.14: 지표 설명 푸터 추가
+    # v4.2.14: 지표 설명 푸터
     indicator_footer = """
     <div style='background:#f8f9fa;padding:25px;border-radius:10px;margin-top:30px;border-left:4px solid #3498db;'>
         <h3 style='color:#2c3e50;margin-top:0;'>📘 주요 지표 설명</h3>
@@ -906,12 +985,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
     <meta http-equiv='Pragma' content='no-cache'>
     <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v4.2.16 - {timestamp}</title>
+    <title>스윙 트레이딩 v4.2.17 - {timestamp}</title>
     <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v4.2.16</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v4.2.17</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
         <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_display}</div><div style='color:{kospi_change_color};'>{kospi_change_text}</div></div>
@@ -929,9 +1008,11 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
         <thead><tr><th>순위</th><th>종목명</th><th>코드</th><th>현재가</th><th>점수</th><th>위험도</th><th>RSI</th><th>이격도</th><th>거래량</th><th>PBR</th></tr></thead>
         <tbody>{table_rows}</tbody>
     </table>
+    {investor_type_section}
+    {indicator_top5_section}
     {indicator_footer}
     <div style='text-align:center;margin-top:30px;padding:20px;color:#7f8c8d;font-size:13px;'>
-        <p>버전: v4.2.16 - 스윙 트레이딩 종목 추천 시스템 (환율 조회 순서 최적화)</p>
+        <p>버전: v4.2.17 - 스윙 트레이딩 종목 추천 시스템 (투자자 유형별 추천 + 지표별 TOP5 복구)</p>
         <p>본 자료는 투자 참고용이며, 투자 책임은 본인에게 있습니다.</p>
     </div>
 </div>
@@ -945,11 +1026,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
 def main():
     """
     v4.2.16: 환율을 맨 먼저 조회하여 rate limit 전에 확보
+    v4.2.17: HTML 섹션 복구 (투자자 유형별 + 지표별 TOP5)
     """
     kst = pytz.timezone('Asia/Seoul')
     start_time = datetime.now(kst)
     
-    logging.info("=== 스윙 트레이딩 분석 시작 (v4.2.16) ===")
+    logging.info("=== 스윙 트레이딩 분석 시작 (v4.2.17) ===")
     
     # v4.2.16: 1단계 - 제일 먼저 환율 조회!
     cache = CacheManager()
