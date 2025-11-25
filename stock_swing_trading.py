@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v4.2.17
+스윙 트레이딩 종목 추천 시스템 v4.2.18
 - v4.2.11: DART corp_code 매핑 개선 + 위험도 평가 시스템 추가 + 보수적 투자자 로직 보정
 - v4.2.12: 🔧 CRITICAL FIX - DARTCorpCodeMapper를 main()에서 한 번만 초기화하여 멀티프로세싱 에러 해결
 - v4.2.13: 🕐 TIMEZONE FIX - 한국 시간(KST, UTC+9) 표시 수정
@@ -9,6 +9,7 @@
 - v4.2.15: 💱 EXCHANGE RATE CACHE - 환율 데이터 캐싱으로 yfinance rate limit 회피
 - v4.2.16: 🚀 EXCHANGE RATE PRIORITY - 환율 조회를 맨 앞으로 이동하여 rate limit 전에 확보
 - v4.2.17: 📊 HTML SECTIONS RESTORE - 투자자 유형별 추천 + 지표별 TOP5 섹션 복구
+- v4.2.18: 🎯 INVESTOR TYPE FIX - 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
 """
 
 import yfinance as yf
@@ -741,6 +742,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     HTML 보고서 생성
     v4.2.11: 위험도 표시 추가
     v4.2.17: 투자자 유형별 추천 + 지표별 TOP5 섹션 복구
+    v4.2.18: 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
     """
     
     # v4.2.11: 위험도 배지 색상
@@ -829,13 +831,25 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{pbr_display}</td>
         </tr>"""
     
-    # v4.2.17: 투자자 유형별 추천 섹션
-    aggressive_stocks = sorted([s for s in top_stocks if s.get('risk_level') != '고위험'], 
-                               key=lambda x: -x['score'])[:5]
-    balanced_stocks = sorted([s for s in top_stocks if s.get('risk_level') == '보통'], 
-                            key=lambda x: -x['score'])[:5]
-    conservative_stocks = sorted([s for s in top_stocks if s.get('risk_level') == '안정'], 
-                                 key=lambda x: -x['score'])[:5]
+    # v4.2.18: 투자자 유형별 추천 섹션 (위험도 기반 필터링)
+    # 공격적: 위험도 무관, 점수 최우선 (TOP 30에서 상위 5개)
+    aggressive_stocks = sorted(top_stocks[:30], key=lambda x: -x['score'])[:5]
+    
+    # 균형: 중간 위험도(30-69점)만 필터링 후 점수 정렬
+    balanced_filtered = [s for s in top_stocks[:30] if 30 <= s.get('risk_score', 0) < 70]
+    balanced_stocks = sorted(balanced_filtered, key=lambda x: -x['score'])[:5]
+    # Fallback: 중간 위험도 종목이 5개 미만이면 낮은 위험도에서 보충
+    if len(balanced_stocks) < 5:
+        low_risk = [s for s in top_stocks[:30] if s.get('risk_score', 0) < 30 and s not in balanced_stocks]
+        balanced_stocks += sorted(low_risk, key=lambda x: -x['score'])[:5-len(balanced_stocks)]
+    
+    # 보수적: 낮은 위험도(0-29점)만 필터링 후 점수 정렬
+    conservative_filtered = [s for s in top_stocks[:30] if s.get('risk_score', 0) < 30]
+    conservative_stocks = sorted(conservative_filtered, key=lambda x: -x['score'])[:5]
+    # Fallback: 낮은 위험도 종목이 5개 미만이면 중간 위험도에서 보충
+    if len(conservative_stocks) < 5:
+        medium_risk = [s for s in top_stocks[:30] if 30 <= s.get('risk_score', 0) < 50 and s not in conservative_stocks]
+        conservative_stocks += sorted(medium_risk, key=lambda x: -x['score'])[:5-len(conservative_stocks)]
     
     def make_investor_card(title, description, stocks, icon, color):
         items = ""
@@ -985,12 +999,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
     <meta http-equiv='Pragma' content='no-cache'>
     <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v4.2.17 - {timestamp}</title>
+    <title>스윙 트레이딩 v4.2.18 - {timestamp}</title>
     <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v4.2.17</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v4.2.18</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
         <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_display}</div><div style='color:{kospi_change_color};'>{kospi_change_text}</div></div>
@@ -1012,7 +1026,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     {indicator_top5_section}
     {indicator_footer}
     <div style='text-align:center;margin-top:30px;padding:20px;color:#7f8c8d;font-size:13px;'>
-        <p>버전: v4.2.17 - 스윙 트레이딩 종목 추천 시스템 (투자자 유형별 추천 + 지표별 TOP5 복구)</p>
+        <p>버전: v4.2.18 - 스윙 트레이딩 종목 추천 시스템 (투자자 유형별 추천 로직 수정)</p>
         <p>본 자료는 투자 참고용이며, 투자 책임은 본인에게 있습니다.</p>
     </div>
 </div>
@@ -1027,11 +1041,12 @@ def main():
     """
     v4.2.16: 환율을 맨 먼저 조회하여 rate limit 전에 확보
     v4.2.17: HTML 섹션 복구 (투자자 유형별 + 지표별 TOP5)
+    v4.2.18: 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
     """
     kst = pytz.timezone('Asia/Seoul')
     start_time = datetime.now(kst)
     
-    logging.info("=== 스윙 트레이딩 분석 시작 (v4.2.17) ===")
+    logging.info("=== 스윙 트레이딩 분석 시작 (v4.2.18) ===")
     
     # v4.2.16: 1단계 - 제일 먼저 환율 조회!
     cache = CacheManager()
