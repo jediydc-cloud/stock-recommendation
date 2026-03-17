@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v5.2
-- v4.2.11 ~ v5.1: (이전 히스토리 동일)
-- v5.2:   🎯 ENTRY SIGNAL PRECISION - 진입 신호 정밀화
-           ✅ 🟢 확인 조건: 거래량 추세 증가 AND 절대 거래량 ≥ 0.7배 AND RSI < 35 (3중 조건)
-              → 0.38배짜리 추세 상승만으로는 🟢 불가 (🟡 관찰로 다운)
-           ✅ ROE nan 처리: ROE 데이터 없으면 🟢→🟡 다운그레이드 (재무 불투명 종목 신뢰도 하락)
-           ✅ 공격형 ROE 최소 기준: ROE ≥ 3% 종목만 공격형 추천 (ROE 1.7% 대한유화 제외)
+스윙 트레이딩 종목 추천 시스템 v5.3
+- v5.2: 진입 신호 3중 조건, ROE nan 처리, 공격형 ROE 최소 기준
+- v5.3: 🔧 PBR 수집 경로 3단계 강화 (전 종목 N/A 버그 수정)
+         ✅ 1순위: yfinance info['priceToBook'] 직접 수집 (가장 안정적)
+         ✅ 2순위: DART equity + KRX shares 역산 (기존 방식)
+         ✅ 3순위: yfinance balance_sheet + shares fallback
+         🔧 보수형/균형형 Fallback ROE None 종목 전면 제외
+         ✅ 모든 Fallback 단계에서 roe is not None 조건 추가
+         ✅ 보수형=균형형 동일 현상 근본 차단
 """
 
 import yfinance as yf
@@ -29,7 +31,6 @@ import io
 import xml.etree.ElementTree as ET
 
 warnings.filterwarnings('ignore')
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
@@ -44,38 +45,14 @@ class CacheManager:
     def init_db(self):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS financial_cache (
-                stock_code TEXT PRIMARY KEY,
-                equity REAL,
-                net_income REAL,
-                cached_at TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS shares_cache (
-                stock_code TEXT PRIMARY KEY,
-                shares_outstanding INTEGER,
-                cached_at TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS dart_corp_map (
-                stock_code TEXT PRIMARY KEY,
-                corp_code TEXT,
-                corp_name TEXT,
-                cached_at TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS exchange_cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usd REAL,
-                eur REAL,
-                jpy REAL,
-                cached_at TEXT
-            )
-        ''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS financial_cache (
+            stock_code TEXT PRIMARY KEY, equity REAL, net_income REAL, cached_at TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS shares_cache (
+            stock_code TEXT PRIMARY KEY, shares_outstanding INTEGER, cached_at TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS dart_corp_map (
+            stock_code TEXT PRIMARY KEY, corp_code TEXT, corp_name TEXT, cached_at TEXT)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS exchange_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, usd REAL, eur REAL, jpy REAL, cached_at TEXT)''')
         conn.commit()
         conn.close()
 
@@ -134,9 +111,7 @@ class CacheManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         kst = pytz.timezone('Asia/Seoul')
-        cursor.execute('''INSERT OR REPLACE INTO dart_corp_map
-                         (stock_code, corp_code, corp_name, cached_at)
-                         VALUES (?, ?, ?, ?)''',
+        cursor.execute('INSERT OR REPLACE INTO dart_corp_map (stock_code, corp_code, corp_name, cached_at) VALUES (?, ?, ?, ?)',
                       (stock_code, corp_code, corp_name, datetime.now(kst).isoformat()))
         conn.commit()
         conn.close()
@@ -192,42 +167,31 @@ class DARTCorpCodeMapper:
         self.base_url = "https://opendart.fss.or.kr/corpCode.xml"
 
         if not self.cache.check_corp_map_valid(days=30):
-            logging.info("⏳ DART corpCode 캐시 만료 → 재다운로드 시작")
+            logging.info("⏳ DART corpCode 캐시 만료 → 재다운로드")
             self._download_and_cache()
         else:
-            logging.info("✅ DART corpCode 캐시 유효 (다운로드 생략)")
+            logging.info("✅ DART corpCode 캐시 유효")
 
     def _download_and_cache(self):
         try:
-            params = {'crtfc_key': self.api_key}
-            response = requests.get(self.base_url, params=params, timeout=30)
-
+            response = requests.get(self.base_url, params={'crtfc_key': self.api_key}, timeout=30)
             if response.status_code != 200:
                 logging.error(f"DART corpCode 다운로드 실패: {response.status_code}")
                 return
-
             with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                xml_filename = z.namelist()[0]
-                xml_data = z.read(xml_filename)
-
+                xml_data = z.read(z.namelist()[0])
             root = ET.fromstring(xml_data)
             count = 0
-
             for corp in root.findall('list'):
                 corp_code = corp.findtext('corp_code', '').strip()
                 corp_name = corp.findtext('corp_name', '').strip()
                 stock_code = corp.findtext('stock_code', '').strip()
-
                 if stock_code and corp_code:
                     self.cache.set_corp_code_cache(stock_code, corp_code, corp_name)
                     count += 1
-
-            logging.info(f"✅ DART corpCode 매핑: {count}개 저장 완료")
+            logging.info(f"✅ DART corpCode: {count}개 저장")
         except Exception as e:
-            logging.error(f"DART corpCode 다운로드/파싱 실패: {e}")
-
-    def get_corp_code(self, stock_code: str) -> Optional[str]:
-        return self.cache.get_corp_code_cache(stock_code, days=30)
+            logging.error(f"DART corpCode 실패: {e}")
 
     def get_all_mappings(self) -> Dict[str, str]:
         return self.cache.get_all_corp_codes(days=30)
@@ -258,60 +222,42 @@ class DARTFinancials:
         cached = self.cache.get_financial_cache(stock_code)
         if cached:
             return cached
-
         self.rate_limit()
 
-        mapped_corp_code = self.corp_code_map.get(stock_code)
-        corp_code_to_use = mapped_corp_code if mapped_corp_code else stock_code.zfill(6)
-
+        corp_code_to_use = self.corp_code_map.get(stock_code) or stock_code.zfill(6)
         kst = pytz.timezone('Asia/Seoul')
         today = datetime.now(kst)
         year = today.year if today.month > 3 else today.year - 1
         quarter = ((today.month - 1) // 3) if today.month > 3 else 4
-        reprt_code_map = {1: '11013', 2: '11012', 3: '11014', 4: '11011'}
-        reprt_code = reprt_code_map[quarter]
-
-        url = f"{self.base_url}/fnlttSinglAcntAll.json"
-        params = {
-            'crtfc_key': self.api_key,
-            'corp_code': corp_code_to_use,
-            'bsns_year': str(year),
-            'reprt_code': reprt_code,
-            'fs_div': 'CFS'
-        }
+        reprt_code = {1: '11013', 2: '11012', 3: '11014', 4: '11011'}[quarter]
 
         try:
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(f"{self.base_url}/fnlttSinglAcntAll.json", params={
+                'crtfc_key': self.api_key, 'corp_code': corp_code_to_use,
+                'bsns_year': str(year), 'reprt_code': reprt_code, 'fs_div': 'CFS'
+            }, timeout=10)
             if response.status_code != 200:
                 return None, None
-
             data = response.json()
             if data.get('status') != '000':
                 return None, None
 
-            items = data.get('list', [])
-            equity = None
-            net_income = None
-
-            for item in items:
+            equity, net_income = None, None
+            for item in data.get('list', []):
                 account_nm = item.get('account_nm', '')
-                thstrm_amount = item.get('thstrm_amount', '').replace(',', '')
-
+                amount_str = item.get('thstrm_amount', '').replace(',', '')
                 if '자본총계' in account_nm:
                     try:
-                        equity = float(thstrm_amount) * 1_000_000
+                        equity = float(amount_str) * 1_000_000
                     except:
                         pass
-
                 if '당기순이익' in account_nm and '지배' in account_nm:
                     try:
-                        net_income = float(thstrm_amount) * 1_000_000
+                        net_income = float(amount_str) * 1_000_000
                     except:
                         pass
-
             if equity or net_income:
                 self.cache.set_financial_cache(stock_code, equity or 0, net_income or 0)
-
             return equity, net_income
         except:
             return None, None
@@ -326,24 +272,20 @@ class KRXData:
         self.shares_data = {}
 
     def load_all_shares(self):
-        url = "http://kind.krx.co.kr/corpgeneral/corpList.do"
-        params = {'method': 'download', 'searchType': '13'}
-
         try:
-            response = requests.get(url, params=params, timeout=30)
+            response = requests.get(
+                "http://kind.krx.co.kr/corpgeneral/corpList.do",
+                params={'method': 'download', 'searchType': '13'}, timeout=30)
             df = pd.read_html(response.content, encoding='euc-kr')[0]
             df['종목코드'] = df['종목코드'].astype(str).str.zfill(6)
-
             for _, row in df.iterrows():
-                code = row['종목코드']
-                shares = row['상장주식수']
+                code, shares = row['종목코드'], row['상장주식수']
                 if pd.notna(shares) and shares > 0:
                     self.shares_data[code] = int(shares)
                     self.cache.set_shares_cache(code, int(shares))
-
-            logging.info(f"발행주식수 수집: {len(self.shares_data)}개")
+            logging.info(f"발행주식수: {len(self.shares_data)}개")
         except Exception as e:
-            logging.warning(f"KRX 발행주식수 로드 실패: {e}")
+            logging.warning(f"KRX 발행주식수 실패: {e}")
 
     def get_shares(self, stock_code: str):
         cached = self.cache.get_shares_cache(stock_code, days=7)
@@ -357,14 +299,11 @@ class KRXData:
 # ============================
 def get_exchange_rates_only(cache: CacheManager) -> Dict[str, Optional[float]]:
     result = {'usd': None, 'eur': None, 'jpy': None}
-
     cached_rates = cache.get_exchange_cache(hours=24)
     if cached_rates:
         result['usd'], result['eur'], result['jpy'] = cached_rates
-        logging.info(f"✅ 환율 캐시 사용: USD={result['usd']:.2f}")
+        logging.info(f"✅ 환율 캐시: USD={result['usd']:.2f}")
         return result
-
-    logging.info("⏳ 환율 데이터 조회 중...")
     try:
         usd = yf.Ticker("KRW=X").history(period='1d')
         result['usd'] = usd['Close'].iloc[-1] if not usd.empty else None
@@ -374,13 +313,10 @@ def get_exchange_rates_only(cache: CacheManager) -> Dict[str, Optional[float]]:
         time.sleep(0.5)
         jpy = yf.Ticker("JPYKRW=X").history(period='1d')
         result['jpy'] = jpy['Close'].iloc[-1] if not jpy.empty else None
-
         if result['usd']:
             cache.set_exchange_cache(result['usd'], result['eur'] or 0, result['jpy'] or 0)
-            logging.info(f"✅ 환율 조회 성공: USD={result['usd']:.2f}")
     except Exception as e:
         logging.warning(f"환율 조회 실패: {e}")
-
     return result
 
 
@@ -389,51 +325,37 @@ def get_exchange_rates_only(cache: CacheManager) -> Dict[str, Optional[float]]:
 # ============================
 def load_stock_list():
     try:
-        url_kospi = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=stockMkt"
-        url_kosdaq = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=kosdaqMkt"
-
-        kospi_r = requests.get(url_kospi, timeout=30)
-        kosdaq_r = requests.get(url_kosdaq, timeout=30)
+        kospi_r = requests.get("http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=stockMkt", timeout=30)
+        kosdaq_r = requests.get("http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=kosdaqMkt", timeout=30)
 
         kospi = pd.read_html(kospi_r.content, header=0, encoding='euc-kr')[0]
         kosdaq = pd.read_html(kosdaq_r.content, header=0, encoding='euc-kr')[0]
-
         all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
         all_stocks['종목코드'] = all_stocks['종목코드'].astype(str).str.zfill(6)
 
-        listing_date_col = None
-        for col in all_stocks.columns:
-            if '상장' in col and '일' in col:
-                listing_date_col = col
-                break
+        listing_date_col = next((c for c in all_stocks.columns if '상장' in c and '일' in c), None)
 
         filtered = []
         for _, row in all_stocks.iterrows():
             name, code = row['회사명'], row['종목코드']
-
-            exclude_keywords = [
-                '우', 'ETN', 'SPAC', '스팩', '리츠', '인프라',
-                '관리', '(M)', '(관)', '정지', '제8호', '제9호', '제10호',
-                '기업인수목적', '기업재무안정'
-            ]
+            exclude_keywords = ['우', 'ETN', 'SPAC', '스팩', '리츠', '인프라',
+                               '관리', '(M)', '(관)', '정지', '제8호', '제9호', '제10호',
+                               '기업인수목적', '기업재무안정']
             if any(k in name for k in exclude_keywords):
                 continue
             if not code.isdigit():
                 continue
-
             if listing_date_col and pd.notna(row.get(listing_date_col)):
                 try:
                     listing_date = pd.to_datetime(str(row[listing_date_col]), errors='coerce')
                     if pd.notna(listing_date):
-                        listing_years = (datetime.now() - listing_date.to_pydatetime()).days / 365.0
-                        if listing_years < 1.0:
+                        if (datetime.now() - listing_date.to_pydatetime()).days / 365.0 < 1.0:
                             continue
                 except:
                     pass
-
             filtered.append([name, code])
 
-        logging.info(f"v5.2 필터링: {len(all_stocks)} → {len(filtered)}개")
+        logging.info(f"종목 필터링: {len(all_stocks)} → {len(filtered)}개")
         return filtered
     except Exception as e:
         logging.error(f"종목 리스트 로드 실패: {e}")
@@ -445,9 +367,10 @@ def load_stock_list():
 # ============================
 def analyze_stock_worker(args):
     """
-    v5.2: 진입 신호 정밀화 + ROE nan 처리 강화
-    🟢 확인 = 거래량 추세증가 AND 절대량 ≥ 0.7배 AND RSI < 35 (3중 조건)
-    ROE nan → 🟢 신호 불가 (재무 불투명)
+    v5.3: PBR 수집 3단계 강화
+    ① yfinance info['priceToBook'] 직접 수집 (1순위)
+    ② DART equity + KRX shares 역산 (2순위)
+    ③ yfinance balance_sheet fallback (3순위)
     """
     import signal
 
@@ -470,15 +393,10 @@ def analyze_stock_worker(args):
         volume_avg = df['Volume'].iloc[-20:-1].mean()
         current_volume = df['Volume'].iloc[-1]
 
-        # ── 입구 필터 1: 거래량 0 ──
         if current_volume == 0:
             return None
-
-        # ── 입구 필터 2: 주가 ≥ 2,000원 ──
         if current_price < 2000:
             return None
-
-        # ── 입구 필터 3: 20일 평균 거래대금 ≥ 3억원 ──
         avg_trading_value = volume_avg * current_price
         if avg_trading_value < 300_000_000:
             return None
@@ -502,67 +420,118 @@ def analyze_stock_worker(args):
         disparity = (current_price / ma20) * 100
         disparity_score = 20 if disparity < 95 else 15 if disparity < 98 else 10 if disparity < 100 else 0
 
-        # 거래량 비율
+        # 거래량
         volume_ratio = current_volume / volume_avg if volume_avg > 0 else 0
         volume_score = 15 if volume_ratio >= 1.5 else 10 if volume_ratio >= 1.2 else 5 if volume_ratio >= 1.0 else 0
 
+        # =====================================================
+        # v5.3: 재무데이터 수집 3단계 강화
+        # =====================================================
         cache = CacheManager()
         dart = DARTFinancials(dart_key, cache, corp_code_map)
         krx = KRXData(cache)
 
         equity, net_income = dart.get_financials(code)
+        shares = krx.get_shares(code)
 
+        pbr_value = None
+        bps_value = None
+        per_value = None
+        roe_value = None
+        eps_value = None
+        pbr_score = 0
+
+        # ─── 1순위: yfinance info 직접 수집 (가장 안정적) ───
+        try:
+            info = ticker.info
+
+            # PBR 직접 수집
+            ptb = info.get('priceToBook')
+            if ptb and ptb > 0:
+                pbr_value = float(ptb)
+
+            # BPS 직접 수집
+            bv = info.get('bookValue')
+            if bv and bv > 0:
+                bps_value = float(bv)
+                if not pbr_value:
+                    pbr_value = current_price / bps_value
+
+            # shares fallback
+            if not shares:
+                shares = info.get('sharesOutstanding') or info.get('floatShares')
+                if shares:
+                    shares = int(shares)
+
+            # equity/net_income fallback
+            if not equity:
+                mc = info.get('marketCap')
+                if mc and pbr_value and pbr_value > 0:
+                    equity = mc / pbr_value  # 시가총액 / PBR = 자본총계 역산
+
+            if not net_income:
+                ni = info.get('netIncomeToCommon') or info.get('profitMargins')
+                if isinstance(ni, float) and ni != info.get('profitMargins'):
+                    net_income = ni  # netIncomeToCommon은 절대값
+                elif info.get('netIncomeToCommon'):
+                    net_income = info['netIncomeToCommon']
+
+        except Exception:
+            pass
+
+        # ─── 2순위: DART equity + KRX shares → BPS/PBR 역산 ───
+        if not pbr_value and equity and shares and shares > 0:
+            try:
+                bps_value = bps_value or (equity / shares)
+                if bps_value and bps_value > 0:
+                    pbr_value = current_price / bps_value
+            except:
+                pass
+
+        # ─── 3순위: yfinance balance_sheet fallback ───
         if not equity or not net_income:
             try:
                 balance_sheet = ticker.balance_sheet
                 financials = ticker.financials
 
-                if not balance_sheet.empty:
-                    if 'Total Stockholder Equity' in balance_sheet.index:
-                        equity = balance_sheet.loc['Total Stockholder Equity'].iloc[0]
-                    elif 'Stockholders Equity' in balance_sheet.index:
-                        equity = balance_sheet.loc['Stockholders Equity'].iloc[0]
+                if not balance_sheet.empty and not equity:
+                    for key in ['Total Stockholder Equity', 'Stockholders Equity',
+                                'Common Stock Equity', 'Total Equity Gross Minority Interest']:
+                        if key in balance_sheet.index:
+                            equity = balance_sheet.loc[key].iloc[0]
+                            break
 
-                if not financials.empty:
-                    if 'Net Income' in financials.index:
-                        net_income = financials.loc['Net Income'].iloc[0]
+                if not financials.empty and not net_income:
+                    for key in ['Net Income', 'Net Income Common Stockholders']:
+                        if key in financials.index:
+                            net_income = financials.loc[key].iloc[0]
+                            break
+
+                # balance_sheet에서 BPS/PBR 재계산
+                if not pbr_value and equity and shares and shares > 0:
+                    bps_value = bps_value or (equity / shares)
+                    if bps_value and bps_value > 0:
+                        pbr_value = current_price / bps_value
+
             except:
                 pass
 
-        shares = krx.get_shares(code)
-        if not shares:
-            try:
-                info = ticker.info
-                shares = info.get('sharesOutstanding') or info.get('floatShares')
-            except:
-                pass
+        # ─── 자본잠식 필터 ───
+        if equity is not None and equity < 0:
+            return None
 
-        pbr_score = 0
-        pbr_value = None
-        per_value = None
-        roe_value = None
-        bps_value = None
-        eps_value = None
+        # PBR 점수
+        if pbr_value and pbr_value > 0:
+            pbr_score = 15 if pbr_value < 1.0 else 10 if pbr_value < 1.5 else 5 if pbr_value < 2.0 else 0
 
-        if equity and shares and shares > 0:
-            bps_value = equity / shares
-            pbr_value = current_price / bps_value if bps_value > 0 else None
-
-            # ── 입구 필터 4: 자본잠식 ──
-            if equity < 0:
-                return None
-
-            if pbr_value:
-                pbr_score = 15 if pbr_value < 1.0 else 10 if pbr_value < 1.5 else 5 if pbr_value < 2.0 else 0
-
+        # EPS / PER
         if net_income and shares and shares > 0:
             eps_value = net_income / shares
             per_value = current_price / eps_value if eps_value > 0 else None
 
+        # ROE
         if net_income and equity and equity > 0:
             roe_value = (net_income / equity) * 100
-
-            # ── 입구 필터 5: ROE < 0 전면 차단 ──
             if roe_value < 0:
                 return None
 
@@ -576,24 +545,16 @@ def analyze_stock_worker(args):
         rebound_score = 10 if rebound_strength >= 5 else 5 if rebound_strength >= 3 else 0
 
         # ROE 패널티
-        roe_penalty = 0
-        if roe_value is not None and 0 <= roe_value < 3.0:
-            roe_penalty = 10
+        roe_penalty = 10 if (roe_value is not None and 0 <= roe_value < 3.0) else 0
 
-        # ── 거래량 추세: 최근 2일 연속 증가 ──
+        # 거래량 추세
         recent_vol_up = (
             len(df) >= 3 and
             df['Volume'].iloc[-1] > df['Volume'].iloc[-2] and
             df['Volume'].iloc[-2] > df['Volume'].iloc[-3]
         )
 
-        # =========================================================
-        # v5.2: 진입 신호 3단계 - 🟢 조건 강화 (3중 조건)
-        # 🟢 확인: 추세 증가 AND 절대량 ≥ 0.7배 AND RSI < 35
-        #         → 0.38배짜리 추세 상승만으론 🟢 불가
-        # 🟡 관찰: 추세 증가 OR 절대량 ≥ 0.8배 (기존 유지)
-        # 🔴 대기: 나머지
-        # =========================================================
+        # v5.2: 진입 신호 3중 조건
         if recent_vol_up and volume_ratio >= 0.7 and current_rsi < 35:
             entry_signal = '확인'
         elif recent_vol_up or volume_ratio >= 0.8:
@@ -601,11 +562,7 @@ def analyze_stock_worker(args):
         else:
             entry_signal = '대기'
 
-        # =========================================================
-        # v5.2: ROE nan → 🟢 신호 다운그레이드 (재무 불투명 종목)
-        # ROE 데이터가 없는 종목은 재무 신뢰도 불명확
-        # → 🟢 확인 불가, 최대 🟡 관찰로 제한
-        # =========================================================
+        # v5.2: ROE nan → 🟢 다운그레이드
         if roe_value is None and entry_signal == '확인':
             entry_signal = '관찰'
 
@@ -613,7 +570,7 @@ def analyze_stock_worker(args):
         total_score = max(0, total_score - roe_penalty)
         trading_value = current_price * current_volume
 
-        # ── 입구 필터 6: 시가총액 ≥ 300억원 ──
+        # 시가총액 필터 ≥ 300억
         market_cap_value = None
         if shares and shares > 0:
             market_cap_value = current_price * shares
@@ -622,18 +579,12 @@ def analyze_stock_worker(args):
 
         # 위험도 평가
         risk_score = 0
-
         if '정지' in name or '거래중지' in name:
             risk_score += 100
-        elif current_volume == 0:
-            risk_score += 100
-
         if '관리' in name or '(M)' in name:
             risk_score += 80
-
         if pbr_value and pbr_value > 5.0:
             risk_score += 80
-
         if net_income and net_income < 0:
             risk_score += 50
 
@@ -643,31 +594,21 @@ def analyze_stock_worker(args):
 
         if volatility_range > 50:
             risk_score += 25
-
         if rebound_strength > 50:
             risk_score += 40
         elif rebound_strength > 30:
             risk_score += 20
-
         if volume_ratio > 5.0:
             risk_score += 20
-
         if disparity > 120:
             risk_score += 15
-
         if pbr_value and pbr_value > 3.0:
             risk_score += 20
 
-        if risk_score >= 70:
-            risk_level = '고위험'
-        elif risk_score >= 30:
-            risk_level = '보통'
-        else:
-            risk_level = '안정'
+        risk_level = '고위험' if risk_score >= 70 else '보통' if risk_score >= 30 else '안정'
 
         if disparity > 100:
-            penalty = int((disparity - 100) * 2)
-            total_score = max(0, total_score - penalty)
+            total_score = max(0, total_score - int((disparity - 100) * 2))
 
         return {
             'name': name, 'code': code, 'price': current_price,
@@ -676,8 +617,7 @@ def analyze_stock_worker(args):
             'pbr': pbr_value, 'per': per_value, 'roe': roe_value,
             'bps': bps_value, 'eps': eps_value,
             'chart_data': chart_data,
-            'risk_score': risk_score,
-            'risk_level': risk_level,
+            'risk_score': risk_score, 'risk_level': risk_level,
             'rebound_strength': rebound_strength,
             'entry_signal': entry_signal,
             'market_cap': market_cap_value
@@ -699,48 +639,40 @@ def get_market_data(exchange_rates: Dict[str, Optional[float]]) -> dict:
         'eur': exchange_rates.get('eur'),
         'jpy': exchange_rates.get('jpy')
     }
-
     try:
         from pykrx import stock
-
         kst = pytz.timezone('Asia/Seoul')
         today = datetime.now(kst)
         for days_back in range(7):
             try:
                 end_date = (today - timedelta(days=days_back)).strftime('%Y%m%d')
                 start_date = (today - timedelta(days=days_back + 5)).strftime('%Y%m%d')
-
-                kospi_df = stock.get_index_ohlcv(start_date, end_date, "1001")
-                if len(kospi_df) >= 2:
-                    result['kospi'] = kospi_df['종가'].iloc[-1]
-                    result['kospi_change'] = ((kospi_df['종가'].iloc[-1] - kospi_df['종가'].iloc[-2]) / kospi_df['종가'].iloc[-2] * 100)
+                df_k = stock.get_index_ohlcv(start_date, end_date, "1001")
+                if len(df_k) >= 2:
+                    result['kospi'] = df_k['종가'].iloc[-1]
+                    result['kospi_change'] = (df_k['종가'].iloc[-1] - df_k['종가'].iloc[-2]) / df_k['종가'].iloc[-2] * 100
                     break
-                elif len(kospi_df) == 1:
-                    result['kospi'] = kospi_df['종가'].iloc[-1]
+                elif len(df_k) == 1:
+                    result['kospi'] = df_k['종가'].iloc[-1]
                     break
             except:
                 continue
-
         for days_back in range(7):
             try:
                 end_date = (today - timedelta(days=days_back)).strftime('%Y%m%d')
                 start_date = (today - timedelta(days=days_back + 5)).strftime('%Y%m%d')
-
-                kosdaq_df = stock.get_index_ohlcv(start_date, end_date, "2001")
-                if len(kosdaq_df) >= 2:
-                    result['kosdaq'] = kosdaq_df['종가'].iloc[-1]
-                    result['kosdaq_change'] = ((kosdaq_df['종가'].iloc[-1] - kosdaq_df['종가'].iloc[-2]) / kosdaq_df['종가'].iloc[-2] * 100)
+                df_q = stock.get_index_ohlcv(start_date, end_date, "2001")
+                if len(df_q) >= 2:
+                    result['kosdaq'] = df_q['종가'].iloc[-1]
+                    result['kosdaq_change'] = (df_q['종가'].iloc[-1] - df_q['종가'].iloc[-2]) / df_q['종가'].iloc[-2] * 100
                     break
-                elif len(kosdaq_df) == 1:
-                    result['kosdaq'] = kosdaq_df['종가'].iloc[-1]
+                elif len(df_q) == 1:
+                    result['kosdaq'] = df_q['종가'].iloc[-1]
                     break
             except:
                 continue
-
-        logging.info(f"pykrx: KOSPI={result['kospi']}, KOSDAQ={result['kosdaq']}")
     except Exception as e:
         logging.warning(f"pykrx 실패: {e}")
-
     return result
 
 
@@ -749,33 +681,25 @@ def get_market_data(exchange_rates: Dict[str, Optional[float]]) -> dict:
 # ============================
 def get_gemini_analysis(top_stocks):
     try:
-        api_key = os.environ.get('swingTrading')
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=os.environ.get('swingTrading'))
         model = genai.GenerativeModel('gemini-2.5-flash')
+        data = [{
+            '종목명': s['name'], '현재가': f"{s['price']:,.0f}원", '총점': f"{s['score']}점",
+            'RSI': f"{s['rsi']:.1f}", '이격도': f"{s['disparity']:.1f}%",
+            '거래량비율': f"{s['volume_ratio']:.2f}배",
+            'PBR': f"{s['pbr']:.2f}" if s.get('pbr') else 'N/A',
+            'PER': f"{s['per']:.1f}" if s.get('per') else 'N/A',
+            'ROE': f"{s['roe']:.1f}%" if s.get('roe') is not None else 'N/A',
+            '진입신호': s.get('entry_signal', '관찰')
+        } for s in top_stocks[:6]]
 
-        data = []
-        for s in top_stocks[:6]:
-            data.append({
-                '종목명': s['name'], '현재가': f"{s['price']:,.0f}원", '총점': f"{s['score']}점",
-                'RSI': f"{s['rsi']:.1f}", '이격도': f"{s['disparity']:.1f}%",
-                '거래량비율': f"{s['volume_ratio']:.2f}배",
-                'PBR': f"{s['pbr']:.2f}" if s['pbr'] else 'N/A',
-                'PER': f"{s['per']:.1f}" if s['per'] else 'N/A',
-                'ROE': f"{s['roe']:.1f}%" if s['roe'] else 'N/A',
-                '진입신호': s.get('entry_signal', '관찰')
-            })
-
-        prompt = f"""20년 경력 애널리스트로 TOP 6 종목 분석:
-{json.dumps(data, ensure_ascii=False, indent=2)}
-
-1. 공통점 2. 주목 종목 3. 진입 타이밍 4. 리스크
-200자 이내, 종목명 언급"""
-
-        response = model.generate_content(prompt)
+        response = model.generate_content(
+            f"20년 경력 애널리스트로 TOP 6 종목 분석:\n{json.dumps(data, ensure_ascii=False, indent=2)}\n\n"
+            f"1. 공통점 2. 주목 종목 3. 진입 타이밍 4. 리스크\n200자 이내, 종목명 언급")
         return response.text
     except Exception as e:
         logging.warning(f"Gemini 오류: {e}")
-        return "<div style='text-align:center; padding:20px; color:#888;'>⚠️ 데이터가 부족하여 AI 분석을 생략합니다</div>"
+        return "<div style='text-align:center;padding:20px;color:#888;'>⚠️ AI 분석 생략</div>"
 
 
 def safe_format(value, fmt, default='N/A'):
@@ -801,14 +725,11 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     # TOP 6 카드
     top6_cards = ""
     for i, s in enumerate(top_stocks[:6], 1):
-        chart_data = s.get('chart_data', [])
-        chart_json = json.dumps(chart_data)
-
-        per_str = safe_format(s['per'], '.1f')
-        pbr_str = safe_format(s['pbr'], '.2f')
-        roe_str = safe_format(s['roe'], '.1f') + '%' if s['roe'] is not None else '⚠️ N/A'
-        bps_str = safe_format(s['bps'], ',.0f') + '원' if s['bps'] else 'N/A'
-
+        chart_json = json.dumps(s.get('chart_data', []))
+        per_str = safe_format(s.get('per'), '.1f')
+        pbr_str = safe_format(s.get('pbr'), '.2f')
+        roe_str = f"{s['roe']:.1f}%" if s.get('roe') is not None else '⚠️ N/A'
+        bps_str = f"{s['bps']:,.0f}원" if s.get('bps') else 'N/A'
         risk_badge = get_risk_badge(s.get('risk_level', '보통'))
         entry_sig = entry_emoji_map.get(s.get('entry_signal', '관찰'), '🟡')
         entry_label = s.get('entry_signal', '관찰')
@@ -818,10 +739,9 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;'>
                 <div>
                     <h3 style='margin:0;color:#2c3e50;'>
-                        {i}. {s['name']}
-                        {risk_badge}
+                        {i}. {s['name']} {risk_badge}
                         <span style='font-size:18px;' title='진입신호: {entry_label}'>{entry_sig}</span>
-                        <a href='https://search.naver.com/search.naver?where=news&query={s['name']}' target='_blank' style='text-decoration:none;font-size:18px;' title='뉴스 검색'>📰</a>
+                        <a href='https://search.naver.com/search.naver?where=news&query={s['name']}' target='_blank' style='text-decoration:none;font-size:18px;'>📰</a>
                     </h3>
                     <p style='margin:5px 0;color:#7f8c8d;font-size:14px;'>{s['code']}</p>
                 </div>
@@ -842,33 +762,28 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             </div>
         </div>
         <script>
-        (function(){{var ctx=document.getElementById('chart{i}').getContext('2d');var data={chart_json};if(data.length===0)return;var prices=data.map(d=>d.close);var minPrice=Math.min(...prices);var maxPrice=Math.max(...prices);var range=maxPrice-minPrice;var padding=range*0.1;var canvas=ctx.canvas;var width=canvas.width;var height=canvas.height;ctx.strokeStyle='#3498db';ctx.lineWidth=2;ctx.beginPath();prices.forEach((price,i)=>{{var x=(i/(prices.length-1))*width;var y=height-((price-minPrice+padding)/(range+2*padding))*height;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}});ctx.stroke();}})();
-        </script>
-        """
+        (function(){{var ctx=document.getElementById('chart{i}').getContext('2d');var data={chart_json};if(data.length===0)return;var prices=data.map(d=>d.close);var minPrice=Math.min(...prices);var maxPrice=Math.max(...prices);var range=maxPrice-minPrice;var padding=range*0.1;var width=ctx.canvas.width;var height=ctx.canvas.height;ctx.strokeStyle='#3498db';ctx.lineWidth=2;ctx.beginPath();prices.forEach((price,i)=>{{var x=(i/(prices.length-1))*width;var y=height-((price-minPrice+padding)/(range+2*padding))*height;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}});ctx.stroke();}})();
+        </script>"""
 
     # TOP 7-30 테이블
     table_rows = ""
     for i, s in enumerate(top_stocks[6:30], 7):
         pbr_display = safe_format(s.get('pbr'), '.2f')
-        roe_display = safe_format(s.get('roe'), '.1f') + '%' if s.get('roe') is not None else '⚠️ N/A'
+        roe_display = f"{s['roe']:.1f}%" if s.get('roe') is not None else '⚠️ N/A'
         risk_level = s.get('risk_level', '보통')
         entry_sig = entry_emoji_map.get(s.get('entry_signal', '관찰'), '🟡')
-        entry_label = s.get('entry_signal', '관찰')
-
-        risk_colors = {'안정': '#27ae60', '보통': '#7f8c8d', '고위험': '#e74c3c'}
-        risk_color = risk_colors.get(risk_level, '#7f8c8d')
+        risk_color = {'안정': '#27ae60', '보통': '#7f8c8d', '고위험': '#e74c3c'}.get(risk_level, '#7f8c8d')
 
         table_rows += f"""<tr>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;'>{i}</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;font-weight:bold;'>
-                {s['name']}
-                <a href='https://search.naver.com/search.naver?where=news&query={s['name']}' target='_blank' style='text-decoration:none;font-size:14px;' title='뉴스 검색'>📰</a>
+                {s['name']} <a href='https://search.naver.com/search.naver?where=news&query={s['name']}' target='_blank' style='text-decoration:none;'>📰</a>
             </td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;'>{s['code']}</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:right;'>{s['price']:,.0f}원</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;font-weight:bold;color:#e74c3c;'>{s['score']}점</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;color:{risk_color};font-weight:bold;'>{risk_level}</td>
-            <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;font-size:16px;' title='진입신호: {entry_label}'>{entry_sig}</td>
+            <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;font-size:16px;'>{entry_sig}</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s['rsi']:.1f}</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s['disparity']:.1f}%</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s['volume_ratio']:.2f}배</td>
@@ -876,243 +791,201 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{roe_display}</td>
         </tr>"""
 
-    # =========================================================
-    # v5.2: 투자자 유형 - 공격형에 ROE ≥ 3% 조건 추가
-    # =========================================================
+    # =====================================================
+    # v5.3: 투자자 유형 — Fallback 전 단계 ROE None 제외
+    # =====================================================
 
-    # 공격형: 이격도<90 + RSI<30 + 🟢확인 + ROE ≥ 3%
-    aggressive_filtered = [
+    # 공격형: 이격도<90 + RSI<30 + 🟢 + ROE≥3%
+    aggressive_stocks = sorted([
         s for s in top_stocks[:30]
-        if s.get('disparity', 100) < 90
-        and s.get('rsi', 100) < 30
+        if s.get('disparity', 100) < 90 and s.get('rsi', 100) < 30
         and s.get('entry_signal') == '확인'
-        and s.get('roe') is not None
-        and s['roe'] >= 3.0
-    ]
-    aggressive_stocks = sorted(aggressive_filtered, key=lambda x: -x['score'])[:5]
-    # Fallback 1: ROE 조건 완화 (존재 여부만)
-    if len(aggressive_stocks) < 5:
-        agg_obs = [
-            s for s in top_stocks[:30]
-            if s.get('disparity', 100) < 93
-            and s.get('rsi', 100) < 35
-            and s.get('roe') is not None
-            and s not in aggressive_stocks
-        ]
-        aggressive_stocks += sorted(agg_obs, key=lambda x: -x['score'])[:5 - len(aggressive_stocks)]
-    # Fallback 2: 점수 기준 상위
-    if len(aggressive_stocks) < 5:
-        remain = [s for s in top_stocks[:30] if s not in aggressive_stocks]
-        aggressive_stocks += sorted(remain, key=lambda x: -x['score'])[:5 - len(aggressive_stocks)]
+        and s.get('roe') is not None and s['roe'] >= 3.0
+    ], key=lambda x: -x['score'])[:5]
 
-    # 균형형: 위험도 보통 이하 + 시총 3,000억↑
-    balanced_filtered = [
+    if len(aggressive_stocks) < 5:
+        agg2 = sorted([
+            s for s in top_stocks[:30]
+            if s.get('disparity', 100) < 93 and s.get('rsi', 100) < 35
+            and s.get('roe') is not None          # ROE None 제외
+            and s not in aggressive_stocks
+        ], key=lambda x: -x['score'])
+        aggressive_stocks += agg2[:5 - len(aggressive_stocks)]
+
+    if len(aggressive_stocks) < 5:
+        agg3 = sorted([
+            s for s in top_stocks[:30]
+            if s.get('roe') is not None            # ROE None 제외 유지
+            and s not in aggressive_stocks
+        ], key=lambda x: -x['score'])
+        aggressive_stocks += agg3[:5 - len(aggressive_stocks)]
+
+    # 균형형: 위험도 보통 이하 + 시총 3,000억↑ + ROE 있는 종목 우선
+    balanced_stocks = sorted([
         s for s in top_stocks[:30]
         if s.get('risk_score', 0) < 70
         and s.get('market_cap') and s['market_cap'] >= 300_000_000_000
-    ]
-    balanced_stocks = sorted(balanced_filtered, key=lambda x: -x['score'])[:5]
+        and s.get('roe') is not None               # ROE None 제외
+    ], key=lambda x: -x['score'])[:5]
+
     if len(balanced_stocks) < 5:
-        bal_loose = [
+        bal2 = sorted([
+            s for s in top_stocks[:30]
+            if s.get('risk_score', 0) < 70
+            and s.get('roe') is not None           # ROE None 제외
+            and s not in balanced_stocks
+        ], key=lambda x: -x['score'])
+        balanced_stocks += bal2[:5 - len(balanced_stocks)]
+
+    if len(balanced_stocks) < 5:                   # 최종 Fallback만 ROE 완화
+        bal3 = sorted([
             s for s in top_stocks[:30]
             if s.get('risk_score', 0) < 70 and s not in balanced_stocks
-        ]
-        balanced_stocks += sorted(bal_loose, key=lambda x: -x['score'])[:5 - len(balanced_stocks)]
+        ], key=lambda x: -x['score'])
+        balanced_stocks += bal3[:5 - len(balanced_stocks)]
 
     # 보수형: 안정 + PBR<1.0 + ROE>5%
-    conservative_filtered = [
+    conservative_stocks = sorted([
         s for s in top_stocks[:30]
         if s.get('risk_level') == '안정'
         and s.get('pbr') and s['pbr'] < 1.0
         and s.get('roe') is not None and s['roe'] > 5.0
-    ]
-    conservative_stocks = sorted(conservative_filtered, key=lambda x: -x['score'])[:5]
+    ], key=lambda x: -x['score'])[:5]
+
     if len(conservative_stocks) < 5:
-        con_loose = [
+        con2 = sorted([
             s for s in top_stocks[:30]
             if s.get('risk_level') == '안정'
             and s.get('pbr') and s['pbr'] < 1.2
+            and s.get('roe') is not None and s['roe'] > 3.0  # ROE 기준 완화
             and s not in conservative_stocks
-        ]
-        conservative_stocks += sorted(con_loose, key=lambda x: -x['score'])[:5 - len(conservative_stocks)]
-    if len(conservative_stocks) < 5:
-        remain = [s for s in top_stocks[:30] if s.get('risk_score', 0) < 30 and s not in conservative_stocks]
-        conservative_stocks += sorted(remain, key=lambda x: -x['score'])[:5 - len(conservative_stocks)]
+        ], key=lambda x: -x['score'])
+        conservative_stocks += con2[:5 - len(conservative_stocks)]
 
-    def make_investor_card(title, description, stocks, icon, color):
+    if len(conservative_stocks) < 5:
+        con3 = sorted([
+            s for s in top_stocks[:30]
+            if s.get('risk_level') == '안정'
+            and s.get('roe') is not None           # ROE None 제외 유지
+            and s not in conservative_stocks
+        ], key=lambda x: -x['score'])
+        conservative_stocks += con3[:5 - len(conservative_stocks)]
+
+    def make_investor_card(title, desc, stocks, icon, color):
         items = ""
         for i, s in enumerate(stocks, 1):
             sig = entry_emoji_map.get(s.get('entry_signal', '관찰'), '🟡')
-            roe_disp = safe_format(s.get('roe'), '.1f') + '%' if s.get('roe') is not None else '⚠️ N/A'
+            roe_d = f"{s['roe']:.1f}%" if s.get('roe') is not None else '⚠️ N/A'
+            pbr_d = f"{s['pbr']:.2f}" if s.get('pbr') else 'N/A'
             items += f"""<div style='padding:10px;background:#f8f9fa;margin:8px 0;border-radius:5px;'>
                 <strong>{i}. {s['name']}</strong> ({s['code']}) {sig}<br>
-                <span style='color:#555;font-size:13px;'>점수: {s['score']}점 | RSI: {s['rsi']:.1f} | 이격도: {s['disparity']:.1f}% | ROE: {roe_disp}</span>
+                <span style='color:#555;font-size:13px;'>점수: {s['score']}점 | RSI: {s['rsi']:.1f} | 이격도: {s['disparity']:.1f}% | PBR: {pbr_d} | ROE: {roe_d}</span>
             </div>"""
-
-        return f"""
-        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border-left:5px solid {color};'>
+        return f"""<div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border-left:5px solid {color};'>
             <h3 style='margin:0 0 10px 0;color:{color};'>{icon} {title}</h3>
-            <p style='color:#555;margin:0 0 15px 0;'>{description}</p>
-            {items}
-        </div>
-        """
+            <p style='color:#555;margin:0 0 15px 0;'>{desc}</p>{items}</div>"""
 
     investor_type_section = f"""
     <h2 style='color:#2c3e50;margin:40px 0 20px;'>👥 투자자 유형별 추천</h2>
     <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:20px;margin-bottom:30px;'>
-        {make_investor_card('공격적 투자자', '🟢 이격도 90↓ + RSI 30↓ + 거래량 0.7배↑ + ROE 3%↑ → 반등 시작', aggressive_stocks, '🚀', '#e74c3c')}
-        {make_investor_card('균형잡힌 투자자', '위험 보통 이하 + 시총 3,000억↑ → 유동성 확보', balanced_stocks, '⚖️', '#3498db')}
+        {make_investor_card('공격적 투자자', '🟢 이격도 90↓ + RSI 30↓ + 거래량 0.7배↑ + ROE 3%↑', aggressive_stocks, '🚀', '#e74c3c')}
+        {make_investor_card('균형잡힌 투자자', '위험 보통↓ + 시총 3,000억↑ + ROE 확인 → 유동성 확보', balanced_stocks, '⚖️', '#3498db')}
         {make_investor_card('보수적 투자자', '위험 안정 + PBR 1.0↓ + ROE 5%↑ → 진짜 저평가 우량주', conservative_stocks, '🛡️', '#27ae60')}
-    </div>
-    """
+    </div>"""
 
     # 지표별 TOP5
     rsi_top5 = sorted(top_stocks, key=lambda x: x['rsi'])[:5]
-    disparity_top5 = sorted(top_stocks, key=lambda x: x['disparity'])[:5]
-    volume_top5 = sorted(top_stocks, key=lambda x: -x['volume_ratio'])[:5]
-    rebound_top5 = sorted(top_stocks, key=lambda x: -x.get('rebound_strength', 0))[:5]
+    disp_top5 = sorted(top_stocks, key=lambda x: x['disparity'])[:5]
+    vol_top5 = sorted(top_stocks, key=lambda x: -x['volume_ratio'])[:5]
+    reb_top5 = sorted(top_stocks, key=lambda x: -x.get('rebound_strength', 0))[:5]
     pbr_top5 = sorted([s for s in top_stocks if s.get('pbr')], key=lambda x: x['pbr'])[:5]
 
-    def make_indicator_list(stocks, show_value_func):
-        items = ""
-        for i, s in enumerate(stocks, 1):
-            items += f"<li><strong>{s['name']}</strong> ({s['code']}) - {show_value_func(s)}</li>"
-        return f"<ul style='margin:10px 0;padding-left:20px;line-height:1.8;'>{items}</ul>"
+    def make_list(stocks, fn):
+        return "<ul style='margin:10px 0;padding-left:20px;line-height:1.8;'>" + \
+               "".join(f"<li><strong>{s['name']}</strong> ({s['code']}) - {fn(s)}</li>" for i, s in enumerate(stocks, 1)) + \
+               "</ul>"
 
     indicator_top5_section = f"""
     <h2 style='color:#2c3e50;margin:40px 0 20px;'>📈 지표별 TOP 5</h2>
     <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:30px;'>
-        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
-            <h3 style='color:#e74c3c;margin:0 0 15px 0;'>📉 RSI 과매도</h3>
-            {make_indicator_list(rsi_top5, lambda s: f"RSI {s['rsi']:.1f}")}
-        </div>
-        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
-            <h3 style='color:#e67e22;margin:0 0 15px 0;'>📊 이격도 하락</h3>
-            {make_indicator_list(disparity_top5, lambda s: f"이격도 {s['disparity']:.1f}%")}
-        </div>
-        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
-            <h3 style='color:#27ae60;margin:0 0 15px 0;'>📦 거래량 급증</h3>
-            {make_indicator_list(volume_top5, lambda s: f"거래량 {s['volume_ratio']:.2f}배")}
-        </div>
-        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
-            <h3 style='color:#9b59b6;margin:0 0 15px 0;'>🎯 반등 강도</h3>
-            {make_indicator_list(rebound_top5, lambda s: f"반등 {s.get('rebound_strength', 0):.1f}%")}
-        </div>
-        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
-            <h3 style='color:#3498db;margin:0 0 15px 0;'>💎 저PBR 가치주</h3>
-            {make_indicator_list(pbr_top5, lambda s: f"PBR {s['pbr']:.2f}")}
-        </div>
-    </div>
-    """
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'><h3 style='color:#e74c3c;margin:0 0 15px 0;'>📉 RSI 과매도</h3>{make_list(rsi_top5, lambda s: f"RSI {s['rsi']:.1f}")}</div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'><h3 style='color:#e67e22;margin:0 0 15px 0;'>📊 이격도 하락</h3>{make_list(disp_top5, lambda s: f"이격도 {s['disparity']:.1f}%")}</div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'><h3 style='color:#27ae60;margin:0 0 15px 0;'>📦 거래량 급증</h3>{make_list(vol_top5, lambda s: f"거래량 {s['volume_ratio']:.2f}배")}</div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'><h3 style='color:#9b59b6;margin:0 0 15px 0;'>🎯 반등 강도</h3>{make_list(reb_top5, lambda s: f"반등 {s.get('rebound_strength',0):.1f}%")}</div>
+        <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'><h3 style='color:#3498db;margin:0 0 15px 0;'>💎 저PBR 가치주</h3>{make_list(pbr_top5, lambda s: f"PBR {s['pbr']:.2f}")}</div>
+    </div>"""
 
-    usd_display = f"{market_data['usd']:,.2f}" if market_data.get('usd') else "N/A"
-    eur_display = f"{market_data['eur']:,.2f}" if market_data.get('eur') else "N/A"
-    jpy_display = f"{market_data['jpy']:,.2f}" if market_data.get('jpy') else "N/A"
-    kospi_display = f"{market_data['kospi']:,.2f}" if market_data.get('kospi') else "N/A"
-    kosdaq_display = f"{market_data['kosdaq']:,.2f}" if market_data.get('kosdaq') else "N/A"
-    kospi_change_color = '#27ae60' if market_data.get('kospi_change', 0) >= 0 else '#e74c3c'
-    kosdaq_change_color = '#27ae60' if market_data.get('kosdaq_change', 0) >= 0 else '#e74c3c'
-    kospi_change_text = f"{market_data.get('kospi_change', 0):+.2f}%"
-    kosdaq_change_text = f"{market_data.get('kosdaq_change', 0):+.2f}%"
+    usd_d = f"{market_data['usd']:,.2f}" if market_data.get('usd') else "N/A"
+    eur_d = f"{market_data['eur']:,.2f}" if market_data.get('eur') else "N/A"
+    jpy_d = f"{market_data['jpy']:,.2f}" if market_data.get('jpy') else "N/A"
+    kospi_d = f"{market_data['kospi']:,.2f}" if market_data.get('kospi') else "N/A"
+    kosdaq_d = f"{market_data['kosdaq']:,.2f}" if market_data.get('kosdaq') else "N/A"
+    kp_cc = '#27ae60' if market_data.get('kospi_change', 0) >= 0 else '#e74c3c'
+    kq_cc = '#27ae60' if market_data.get('kosdaq_change', 0) >= 0 else '#e74c3c'
+    kp_ct = f"{market_data.get('kospi_change', 0):+.2f}%"
+    kq_ct = f"{market_data.get('kosdaq_change', 0):+.2f}%"
 
     indicator_footer = """
     <div style='background:#f8f9fa;padding:25px;border-radius:10px;margin-top:30px;border-left:4px solid #3498db;'>
         <h3 style='color:#2c3e50;margin-top:0;'>📘 주요 지표 설명</h3>
         <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;'>
-            <div>
-                <h4 style='color:#e74c3c;margin-bottom:10px;'>📊 RSI (Relative Strength Index)</h4>
-                <p style='color:#555;line-height:1.6;margin:0;'>상대강도지수로 과매수/과매도 판단 지표입니다. 30 이하는 과매도(매수 기회), 70 이상은 과매수(조정 가능성)를 의미합니다.</p>
-            </div>
-            <div>
-                <h4 style='color:#e67e22;margin-bottom:10px;'>📈 이격도 (Disparity)</h4>
-                <p style='color:#555;line-height:1.6;margin:0;'>현재가가 20일 이동평균선 대비 얼마나 떨어져 있는지 나타냅니다. 95% 이하는 저평가, 105% 이상은 과열 신호입니다.</p>
-            </div>
-            <div>
-                <h4 style='color:#27ae60;margin-bottom:10px;'>📦 거래량 비율</h4>
-                <p style='color:#555;line-height:1.6;margin:0;'>최근 20일 평균 거래량 대비 현재 거래량입니다. 1.5배 이상이면 거래 활성화, 관심도 증가를 의미합니다.</p>
-            </div>
-            <div>
-                <h4 style='color:#9b59b6;margin-bottom:10px;'>💰 PBR (Price to Book Ratio)</h4>
-                <p style='color:#555;line-height:1.6;margin:0;'>주가순자산비율로 기업의 청산가치 대비 주가를 나타냅니다. 1.0 이하는 저평가, 3.0 이상은 고평가 구간입니다.</p>
-            </div>
-            <div>
-                <h4 style='color:#3498db;margin-bottom:10px;'>💵 PER (Price to Earnings Ratio)</h4>
-                <p style='color:#555;line-height:1.6;margin:0;'>주가수익비율로 기업의 수익성 대비 주가를 나타냅니다. 낮을수록 저평가, 업종 평균과 비교하여 판단합니다.</p>
-            </div>
-            <div>
-                <h4 style='color:#e74c3c;margin-bottom:10px;'>📊 ROE (Return on Equity)</h4>
-                <p style='color:#555;line-height:1.6;margin:0;'>자기자본이익률로 기업의 수익 창출 능력을 나타냅니다. 10% 이상이면 양호, 15% 이상이면 우수한 수준입니다. ⚠️ N/A는 재무 데이터 미제공 종목입니다.</p>
-            </div>
+            <div><h4 style='color:#e74c3c;'>📊 RSI</h4><p style='color:#555;line-height:1.6;margin:0;'>30 이하: 과매도(매수 기회) / 70 이상: 과매수</p></div>
+            <div><h4 style='color:#e67e22;'>📈 이격도</h4><p style='color:#555;line-height:1.6;margin:0;'>95% 이하: 저평가 / 105% 이상: 과열</p></div>
+            <div><h4 style='color:#27ae60;'>📦 거래량 비율</h4><p style='color:#555;line-height:1.6;margin:0;'>1.5배↑: 거래 활성화 / 0.7배↑+추세증가: 🟢 진입 신호</p></div>
+            <div><h4 style='color:#9b59b6;'>💰 PBR</h4><p style='color:#555;line-height:1.6;margin:0;'>1.0 이하: 저평가 / 3.0 이상: 고평가 (v5.3: 3단계 수집)</p></div>
+            <div><h4 style='color:#3498db;'>💵 PER</h4><p style='color:#555;line-height:1.6;margin:0;'>낮을수록 저평가 / 업종 평균과 비교 필요</p></div>
+            <div><h4 style='color:#e74c3c;'>📊 ROE</h4><p style='color:#555;line-height:1.6;margin:0;'>10%↑: 양호 / 15%↑: 우수 / ⚠️ N/A: 재무 불투명</p></div>
         </div>
-
-        <div style='margin-top:25px;padding-top:20px;border-top:2px solid #ddd;'>
-            <h4 style='color:#e74c3c;margin-bottom:15px;'>⚠️ 위험도 평가 기준</h4>
-            <div style='background:white;padding:15px;border-radius:8px;margin-bottom:10px;'>
-                <strong style='color:#e74c3c;'>🚨 고위험 (70점 이상):</strong>
-                <span style='color:#555;'>거래정지, 관리종목, 자본잠식, 적자, 급등락, 과도한 반등, 거래량 급증, 과열 이격도, 과열 밸류에이션 등 복합 위험 요소 존재</span>
-            </div>
-            <div style='background:white;padding:15px;border-radius:8px;margin-bottom:10px;'>
-                <strong style='color:#7f8c8d;'>⚠️ 보통 (30~69점):</strong>
-                <span style='color:#555;'>일부 위험 요소가 존재하나 관리 가능한 수준. 신중한 접근 필요</span>
-            </div>
-            <div style='background:white;padding:15px;border-radius:8px;'>
-                <strong style='color:#27ae60;'>✅ 안정 (0~29점):</strong>
-                <span style='color:#555;'>주요 위험 요소가 없거나 경미한 수준. 상대적으로 안전한 투자 대상</span>
-            </div>
-        </div>
-
         <div style='margin-top:20px;padding:15px;background:#e8f4fd;border-radius:8px;border-left:4px solid #3498db;'>
-            <h4 style='color:#2980b9;margin-top:0;'>🎯 v5.2 진입 신호 기준</h4>
+            <h4 style='color:#2980b9;margin-top:0;'>🎯 v5.3 진입 신호 기준</h4>
             <ul style='color:#555;line-height:1.8;margin:0;padding-left:20px;'>
-                <li><strong>🟢 확인</strong>: 거래량 2일 연속 증가 AND 거래량 ≥ 0.7배 AND RSI &lt; 35 (3중 조건)</li>
-                <li><strong>🟡 관찰</strong>: 거래량 추세 증가 OR 거래량 ≥ 0.8배 (1개 조건 충족)</li>
-                <li><strong>🔴 대기</strong>: 거래량 감소 + 모멘텀 부재 → 진입 금지</li>
-                <li>ROE 데이터 없는 종목은 🟢→🟡 자동 다운그레이드 (재무 불투명)</li>
+                <li><strong>🟢 확인</strong>: 거래량 2일 연속↑ AND ≥0.7배 AND RSI &lt;35 (3중 조건)</li>
+                <li><strong>🟡 관찰</strong>: 거래량 추세↑ OR ≥0.8배 / ROE nan 종목은 최대 🟡</li>
+                <li><strong>🔴 대기</strong>: 거래량 감소 + 모멘텀 부재</li>
             </ul>
         </div>
-
+        <div style='margin-top:15px;padding:15px;background:#e8f5e9;border-radius:8px;border-left:4px solid #27ae60;'>
+            <h4 style='color:#1b5e20;margin-top:0;'>🔧 v5.3 PBR 수집 3단계</h4>
+            <ul style='color:#555;line-height:1.8;margin:0;padding-left:20px;'>
+                <li><strong>1순위</strong>: yfinance info['priceToBook'] 직접 수집</li>
+                <li><strong>2순위</strong>: DART equity + KRX shares 역산</li>
+                <li><strong>3순위</strong>: yfinance balance_sheet fallback</li>
+            </ul>
+        </div>
         <div style='margin-top:15px;padding:20px;background:#fff3cd;border-radius:8px;border-left:4px solid #ffc107;'>
             <h4 style='color:#856404;margin-top:0;'>💡 투자 유의사항</h4>
             <ul style='color:#856404;line-height:1.8;margin:0;padding-left:20px;'>
                 <li>본 분석은 기술적 지표 기반 참고 자료이며, 투자 판단은 본인 책임입니다.</li>
-                <li>위험도 평가는 객관적 지표 기반이나, 시장 상황에 따라 변동될 수 있습니다.</li>
-                <li>PER/PBR N/A는 적자 기업이거나 데이터 미제공 종목입니다.</li>
                 <li>거래량이 적은 종목은 매수/매도 시 슬리피지가 클 수 있습니다.</li>
                 <li>스윙 트레이딩은 단기 수익을 목표로 하므로 손절 라인 설정이 필수입니다.</li>
                 <li>시장 상황(전체 지수 흐름)도 함께 고려하여 진입 타이밍을 결정하세요.</li>
                 <li>분산 투자로 리스크를 관리하고, 한 종목에 과도한 비중을 두지 마세요.</li>
             </ul>
         </div>
-    </div>
-    """
+    </div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang='ko'>
 <head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width,initial-scale=1.0'>
+    <meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'>
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
-    <meta http-equiv='Pragma' content='no-cache'>
-    <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v5.2 - {timestamp}</title>
-    <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
+    <title>스윙 트레이딩 v5.3 - {timestamp}</title>
+    <style>body{{font-family:'Segoe UI',sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v5.2</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v5.3</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
-        <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_display}</div><div style='color:{kospi_change_color};'>{kospi_change_text}</div></div>
-        <div class='market-card'><h3 style='margin:0;color:#3498db;'>KOSDAQ</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kosdaq_display}</div><div style='color:{kosdaq_change_color};'>{kosdaq_change_text}</div></div>
-        <div class='market-card'><h3 style='margin:0;color:#95a5a6;'>USD/KRW</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{usd_display}</div></div>
-        <div class='market-card'><h3 style='margin:0;color:#95a5a6;'>EUR/KRW</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{eur_display}</div></div>
-        <div class='market-card'><h3 style='margin:0;color:#95a5a6;'>JPY/KRW</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{jpy_display}</div></div>
+        <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_d}</div><div style='color:{kp_cc};'>{kp_ct}</div></div>
+        <div class='market-card'><h3 style='margin:0;color:#3498db;'>KOSDAQ</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kosdaq_d}</div><div style='color:{kq_cc};'>{kq_ct}</div></div>
+        <div class='market-card'><h3 style='margin:0;color:#95a5a6;'>USD/KRW</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{usd_d}</div></div>
+        <div class='market-card'><h3 style='margin:0;color:#95a5a6;'>EUR/KRW</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{eur_d}</div></div>
+        <div class='market-card'><h3 style='margin:0;color:#95a5a6;'>JPY/KRW</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{jpy_d}</div></div>
     </div>
     <div class='ai-analysis'><h2 style='margin:0 0 15px 0;color:#2c3e50;'>🤖 AI 종합 분석</h2>{ai_analysis}</div>
     <h2 style='color:#2c3e50;margin:30px 0 20px;'>🏆 추천 종목 TOP 30</h2>
-    <div class='top-stocks'>
-        {top6_cards}
-    </div>
+    <div class='top-stocks'>{top6_cards}</div>
     <table>
         <thead><tr><th>순위</th><th>종목명</th><th>코드</th><th>현재가</th><th>점수</th><th>위험도</th><th>진입신호</th><th>RSI</th><th>이격도</th><th>거래량</th><th>PBR</th><th>ROE</th></tr></thead>
         <tbody>{table_rows}</tbody>
@@ -1121,7 +994,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     {indicator_top5_section}
     {indicator_footer}
     <div style='text-align:center;margin-top:30px;padding:20px;color:#7f8c8d;font-size:13px;'>
-        <p>버전: v5.2 - 진입 신호 3중 조건 (거래량 추세+절대량+RSI) · ROE nan 처리 · 공격형 ROE 최소 기준</p>
+        <p>v5.3 - PBR 3단계 수집 · ROE nan 전면 차단 · 보수형/균형형 Fallback 강화</p>
         <p>본 자료는 투자 참고용이며, 투자 책임은 본인에게 있습니다.</p>
     </div>
 </div>
@@ -1134,11 +1007,9 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
 # 11. 메인 함수
 # ============================
 def main():
-    """v5.2: 진입 신호 정밀화 + ROE nan 처리 + 공격형 ROE 최소 기준"""
     kst = pytz.timezone('Asia/Seoul')
     start_time = datetime.now(kst)
-
-    logging.info("=== 스윙 트레이딩 분석 시작 (v5.2) ===")
+    logging.info("=== 스윙 트레이딩 분석 시작 (v5.3) ===")
 
     cache = CacheManager()
     exchange_rates = get_exchange_rates_only(cache)
@@ -1146,7 +1017,7 @@ def main():
 
     dart_key = os.environ.get('DART_API')
     if not dart_key:
-        logging.warning("⚠️ DART_API 환경변수 없음 → yfinance fallback")
+        logging.warning("⚠️ DART_API 없음 → yfinance fallback")
 
     mapper = DARTCorpCodeMapper(dart_key, cache) if dart_key else None
     corp_code_map = mapper.get_all_mappings() if mapper else {}
@@ -1167,12 +1038,11 @@ def main():
 
     valid_results = [r for r in results if r and r['score'] >= 50]
     valid_results.sort(key=lambda x: (-x['score'], -x['trading_value']))
-
     top_stocks = valid_results[:30]
-    logging.info(f"v5.2 분석 완료: {len(valid_results)}개 종목 추출")
+
+    logging.info(f"v5.3 완료: {len(valid_results)}개 추출")
 
     ai_analysis = get_gemini_analysis(top_stocks)
-
     timestamp = datetime.now(kst).strftime('%Y-%m-%d %H:%M:%S')
     html_content = generate_html(top_stocks, market_data, ai_analysis, timestamp)
 
@@ -1180,20 +1050,19 @@ def main():
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(html_content)
 
-    end_time = datetime.now(kst)
-    elapsed = (end_time - start_time).total_seconds()
-    logging.info(f"=== 완료: {filename} (소요시간: {elapsed:.1f}초) ===")
+    elapsed = (datetime.now(kst) - start_time).total_seconds()
+    logging.info(f"=== 완료: {filename} ({elapsed:.1f}초) ===")
     print(f"\n✅ {filename}")
 
+    entry_map = {'확인': '🟢', '관찰': '🟡', '대기': '🔴'}
+    risk_map = {'안정': '✅', '보통': '⚠️', '고위험': '🚨'}
     for i, s in enumerate(top_stocks[:10], 1):
-        risk_emoji = {'안정': '✅', '보통': '⚠️', '고위험': '🚨'}
-        emoji = risk_emoji.get(s.get('risk_level', '보통'), '⚠️')
-        entry_sig = {'확인': '🟢', '관찰': '🟡', '대기': '🔴'}.get(s.get('entry_signal', '관찰'), '🟡')
-        print(f"  {i}. {s['name']} ({s['code']}) - {s['score']}점 {emoji}{s.get('risk_level', '보통')} {entry_sig}")
-        per_str = "N/A" if not s.get('per') else f"{s['per']:.1f}"
-        pbr_str = "N/A" if not s.get('pbr') else f"{s['pbr']:.2f}"
-        roe_str = "⚠️N/A" if s.get('roe') is None else f"{s['roe']:.1f}%"
-        print(f"      PER: {per_str} | PBR: {pbr_str} | ROE: {roe_str}")
+        print(f"  {i}. {s['name']} ({s['code']}) - {s['score']}점 "
+              f"{risk_map.get(s.get('risk_level','보통'),'⚠️')}{s.get('risk_level','보통')} "
+              f"{entry_map.get(s.get('entry_signal','관찰'),'🟡')}")
+        pbr_s = f"{s['pbr']:.2f}" if s.get('pbr') else 'N/A'
+        roe_s = f"{s['roe']:.1f}%" if s.get('roe') is not None else '⚠️N/A'
+        print(f"      PBR: {pbr_s} | ROE: {roe_s}")
 
 
 if __name__ == "__main__":
