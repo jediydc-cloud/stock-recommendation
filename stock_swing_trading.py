@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v5.0
+스윙 트레이딩 종목 추천 시스템 v5.1
 - v4.2.11: DART corp_code 매핑 개선 + 위험도 평가 시스템 추가 + 보수적 투자자 로직 보정
 - v4.2.12: 🔧 CRITICAL FIX - DARTCorpCodeMapper를 main()에서 한 번만 초기화하여 멀티프로세싱 에러 해결
 - v4.2.13: 🕐 TIMEZONE FIX - 한국 시간(KST, UTC+9) 표시 수정
@@ -15,6 +15,13 @@
            ✅ 자본잠식·완전적자·거래량=0 종목 early return 추가
            ✅ 급락/급등 구분 개선 (risk_score 정밀화)
            ✅ 기존 점수계산·함수명·멀티프로세싱·환경변수·HTML 8섹션 전부 유지
+- v5.1:   🎯 SWING SIGNAL UPGRADE - 스윙 진입 신호 고도화
+           ✅ ROE 적자(< 0) 종목 전면 차단 (음수 ROE 기업 조기 제거)
+           ✅ ROE < 3% 수익성 제로 구간 -10점 패널티
+           ✅ 거래량 추세 신호: 최근 2일 연속 증가(recent_vol_up) 계산
+           ✅ 진입 신호 3단계: 🟢확인(RSI<35+거래량증가) / 🟡관찰 / 🔴대기
+           ✅ 투자자 유형 기준 재정의: 공격형(이격도↓+RSI↓+🟢) / 균형형(시총↑) / 보수형(PBR↓+ROE↑)
+           ✅ 시가총액(market_cap) 결과 딕셔너리에 추가
 """
 
 import yfinance as yf
@@ -299,7 +306,7 @@ class DARTFinancials:
         url = f"{self.base_url}/fnlttSinglAcntAll.json"
         params = {
             'crtfc_key': self.api_key,
-            'corp_code': corp_code_to_use,  # v4.2.12: 매핑 코드 사용
+            'corp_code': corp_code_to_use,
             'bsns_year': str(year),
             'reprt_code': reprt_code,
             'fs_div': 'CFS'
@@ -482,6 +489,7 @@ def load_stock_list():
 def analyze_stock_worker(args):
     """v4.2.12: corp_code_map을 인자로 받아서 사용 (다운로드 없음)
     v5.0: 입구 필터 추가 (주가/거래대금/시가총액/자본잠식/완전적자/거래량=0 early return)
+    v5.1: ROE 적자 차단 + ROE 패널티 + 거래량 추세 신호 + 진입 신호 3단계 분류
     """
     import signal
     
@@ -608,9 +616,10 @@ def analyze_stock_worker(args):
             roe_value = (net_income / equity) * 100
 
             # =====================================================
-            # v5.0 입구 필터 5: 완전적자 (ROE < -15%) 선제 차단
+            # v5.0 입구 필터 5: 완전적자 선제 차단
+            # v5.1 강화: ROE < 0 (모든 적자 기업) 차단
             # =====================================================
-            if roe_value < -15.0:
+            if roe_value < 0:
                 return None
         
         # 5일 수익률
@@ -621,17 +630,46 @@ def analyze_stock_worker(args):
         low_20d = df['Low'].iloc[-20:].min()
         rebound_strength = ((current_price - low_20d) / low_20d * 100) if low_20d > 0 else 0
         rebound_score = 10 if rebound_strength >= 5 else 5 if rebound_strength >= 3 else 0
-        
+
+        # =====================================================
+        # v5.1: ROE 극저수익 패널티 및 거래량 추세 신호
+        # =====================================================
+        roe_penalty = 0
+        if roe_value is not None and 0 <= roe_value < 3.0:
+            roe_penalty = 10  # 수익성 사실상 제로 → 감점
+
+        # 거래량 추세: 최근 2일 연속 증가 여부 (반등 시작 신호)
+        recent_vol_up = (
+            len(df) >= 3 and
+            df['Volume'].iloc[-1] > df['Volume'].iloc[-2] and
+            df['Volume'].iloc[-2] > df['Volume'].iloc[-3]
+        )
+
+        # =====================================================
+        # v5.1: 진입 신호 3단계 분류
+        # 🟢 확인: RSI 과매도 + 거래량 연속 증가 → 반등 시작
+        # 🟡 관찰: 조건 충족, 거래량 미확인 → 대기 후 진입
+        # 🔴 대기: 거래량 감소 중 → 진입 금지
+        # =====================================================
+        if recent_vol_up and current_rsi < 35:
+            entry_signal = '확인'
+        elif recent_vol_up or volume_ratio >= 0.8:
+            entry_signal = '관찰'
+        else:
+            entry_signal = '대기'
+
         total_score = rsi_score + disparity_score + volume_score + pbr_score + returns_score + rebound_score
+        total_score = max(0, total_score - roe_penalty)  # v5.1: ROE 패널티 적용
         trading_value = current_price * current_volume
         
         # =====================================================
         # v5.0 입구 필터 6: 시가총액 >= 300억원 (소형주 선제 차단)
         # shares가 있으면 시총 계산, 없으면 통과 (데이터 없음)
         # =====================================================
+        market_cap_value = None
         if shares and shares > 0:
-            market_cap = current_price * shares
-            if market_cap < 30_000_000_000:  # 300억원
+            market_cap_value = current_price * shares
+            if market_cap_value < 30_000_000_000:  # 300억원
                 return None
 
         # v4.2.11: 위험도 평가 로직
@@ -703,9 +741,11 @@ def analyze_stock_worker(args):
             'pbr': pbr_value, 'per': per_value, 'roe': roe_value, 
             'bps': bps_value, 'eps': eps_value,
             'chart_data': chart_data,
-            'risk_score': risk_score,  # v4.2.11
-            'risk_level': risk_level,   # v4.2.11
-            'rebound_strength': rebound_strength  # v4.2.17: 반등 강도 추가
+            'risk_score': risk_score,   # v4.2.11
+            'risk_level': risk_level,    # v4.2.11
+            'rebound_strength': rebound_strength,  # v4.2.17: 반등 강도 추가
+            'entry_signal': entry_signal,   # v5.1: 진입 신호 🟢/🟡/🔴
+            'market_cap': market_cap_value  # v5.1: 투자자 유형 필터용
         }
     except Exception:
         return None
@@ -817,6 +857,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     v4.2.11: 위험도 표시 추가
     v4.2.17: 투자자 유형별 추천 + 지표별 TOP5 섹션 복구
     v4.2.18: 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
+    v5.1: 진입 신호 배지 + 투자자 유형 기준 재정의
     """
     
     # v4.2.11: 위험도 배지 색상
@@ -828,6 +869,9 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
         }
         color = colors.get(risk_level, '#7f8c8d')
         return f"<span style='display:inline-block;padding:3px 8px;margin-left:8px;border-radius:4px;font-size:12px;font-weight:bold;background:{color};color:white;'>{risk_level}</span>"
+
+    # v5.1: 진입 신호 이모지 매핑
+    entry_emoji_map = {'확인': '🟢', '관찰': '🟡', '대기': '🔴'}
     
     # TOP 6 카드
     top6_cards = ""
@@ -840,8 +884,10 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
         roe_str = safe_format(s['roe'], '.1f') + '%' if s['roe'] else 'N/A'
         bps_str = safe_format(s['bps'], ',.0f') + '원' if s['bps'] else 'N/A'
         
-        # v4.2.11: 위험도 배지 추가
+        # v4.2.11: 위험도 배지 추가 / v5.1: 진입 신호 배지 추가
         risk_badge = get_risk_badge(s.get('risk_level', '보통'))
+        entry_sig = entry_emoji_map.get(s.get('entry_signal', '관찰'), '🟡')
+        entry_label = s.get('entry_signal', '관찰')
         
         top6_cards += f"""
         <div style='background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);'>
@@ -850,6 +896,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
                     <h3 style='margin:0;color:#2c3e50;'>
                         {i}. {s['name']} 
                         {risk_badge}
+                        <span style='font-size:18px;' title='진입신호: {entry_label}'>{entry_sig}</span>
                         <a href='https://search.naver.com/search.naver?where=news&query={s['name']}' target='_blank' style='text-decoration:none;font-size:18px;' title='뉴스 검색'>📰</a>
                     </h3>
                     <p style='margin:5px 0;color:#7f8c8d;font-size:14px;'>{s['code']}</p>
@@ -875,11 +922,13 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
         </script>
         """
     
-    # TOP 7-30 테이블 (v4.2.11: 위험도 컬럼 추가)
+    # TOP 7-30 테이블 (v4.2.11: 위험도 컬럼 / v5.1: 진입신호 컬럼 추가)
     table_rows = ""
     for i, s in enumerate(top_stocks[6:30], 7):
         pbr_display = safe_format(s.get('pbr'), '.2f')
         risk_level = s.get('risk_level', '보통')
+        entry_sig = entry_emoji_map.get(s.get('entry_signal', '관찰'), '🟡')
+        entry_label = s.get('entry_signal', '관찰')
         
         # 위험도 색상
         risk_colors = {
@@ -899,38 +948,83 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:right;'>{s['price']:,.0f}원</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;font-weight:bold;color:#e74c3c;'>{s['score']}점</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;color:{risk_color};font-weight:bold;'>{risk_level}</td>
+            <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;font-size:16px;' title='진입신호: {entry_label}'>{entry_sig}</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s['rsi']:.1f}</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s['disparity']:.1f}%</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s['volume_ratio']:.2f}배</td>
             <td style='padding:12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{pbr_display}</td>
         </tr>"""
     
-    # v4.2.18: 투자자 유형별 추천 섹션 (위험도 기반 필터링)
-    # 공격적: 위험도 무관, 점수 최우선 (TOP 30에서 상위 5개)
-    aggressive_stocks = sorted(top_stocks[:30], key=lambda x: -x['score'])[:5]
-    
-    # 균형: 중간 위험도(30-69점)만 필터링 후 점수 정렬
-    balanced_filtered = [s for s in top_stocks[:30] if 30 <= s.get('risk_score', 0) < 70]
+    # =====================================================
+    # v5.1: 투자자 유형 기준 재정의 (전문가 피드백 반영)
+    # =====================================================
+
+    # 공격형: 이격도 90↓ + RSI 30↓ + 거래량 확인(🟢) → 반등 시작 포착
+    aggressive_filtered = [
+        s for s in top_stocks[:30]
+        if s.get('disparity', 100) < 90
+        and s.get('rsi', 100) < 30
+        and s.get('entry_signal') == '확인'
+    ]
+    aggressive_stocks = sorted(aggressive_filtered, key=lambda x: -x['score'])[:5]
+    # Fallback: 관찰 신호까지 확장
+    if len(aggressive_stocks) < 5:
+        agg_obs = [
+            s for s in top_stocks[:30]
+            if s.get('disparity', 100) < 93
+            and s.get('rsi', 100) < 35
+            and s not in aggressive_stocks
+        ]
+        aggressive_stocks += sorted(agg_obs, key=lambda x: -x['score'])[:5 - len(aggressive_stocks)]
+    # 최종 Fallback: 점수 기준 상위
+    if len(aggressive_stocks) < 5:
+        remain = [s for s in top_stocks[:30] if s not in aggressive_stocks]
+        aggressive_stocks += sorted(remain, key=lambda x: -x['score'])[:5 - len(aggressive_stocks)]
+
+    # 균형형: 위험도 보통 이하 + 시총 3,000억↑ (유동성 확보)
+    balanced_filtered = [
+        s for s in top_stocks[:30]
+        if s.get('risk_score', 0) < 70
+        and s.get('market_cap') and s['market_cap'] >= 300_000_000_000
+    ]
     balanced_stocks = sorted(balanced_filtered, key=lambda x: -x['score'])[:5]
-    # Fallback: 중간 위험도 종목이 5개 미만이면 낮은 위험도에서 보충
+    # Fallback: 시총 조건 완화
     if len(balanced_stocks) < 5:
-        low_risk = [s for s in top_stocks[:30] if s.get('risk_score', 0) < 30 and s not in balanced_stocks]
-        balanced_stocks += sorted(low_risk, key=lambda x: -x['score'])[:5-len(balanced_stocks)]
-    
-    # 보수적: 낮은 위험도(0-29점)만 필터링 후 점수 정렬
-    conservative_filtered = [s for s in top_stocks[:30] if s.get('risk_score', 0) < 30]
+        bal_loose = [
+            s for s in top_stocks[:30]
+            if s.get('risk_score', 0) < 70 and s not in balanced_stocks
+        ]
+        balanced_stocks += sorted(bal_loose, key=lambda x: -x['score'])[:5 - len(balanced_stocks)]
+
+    # 보수형: 위험도 안정 + PBR < 1.0 + ROE > 5% → 진짜 저평가 우량주
+    conservative_filtered = [
+        s for s in top_stocks[:30]
+        if s.get('risk_level') == '안정'
+        and s.get('pbr') and s['pbr'] < 1.0
+        and s.get('roe') and s['roe'] > 5.0
+    ]
     conservative_stocks = sorted(conservative_filtered, key=lambda x: -x['score'])[:5]
-    # Fallback: 낮은 위험도 종목이 5개 미만이면 중간 위험도에서 보충
+    # Fallback: ROE 조건 완화 (> 3%)
     if len(conservative_stocks) < 5:
-        medium_risk = [s for s in top_stocks[:30] if 30 <= s.get('risk_score', 0) < 50 and s not in conservative_stocks]
-        conservative_stocks += sorted(medium_risk, key=lambda x: -x['score'])[:5-len(conservative_stocks)]
-    
+        con_loose = [
+            s for s in top_stocks[:30]
+            if s.get('risk_level') == '안정'
+            and s.get('pbr') and s['pbr'] < 1.2
+            and s not in conservative_stocks
+        ]
+        conservative_stocks += sorted(con_loose, key=lambda x: -x['score'])[:5 - len(conservative_stocks)]
+    # 최종 Fallback
+    if len(conservative_stocks) < 5:
+        remain = [s for s in top_stocks[:30] if s.get('risk_score', 0) < 30 and s not in conservative_stocks]
+        conservative_stocks += sorted(remain, key=lambda x: -x['score'])[:5 - len(conservative_stocks)]
+
     def make_investor_card(title, description, stocks, icon, color):
         items = ""
         for i, s in enumerate(stocks, 1):
+            sig = entry_emoji_map.get(s.get('entry_signal', '관찰'), '🟡')
             items += f"""<div style='padding:10px;background:#f8f9fa;margin:8px 0;border-radius:5px;'>
-                <strong>{i}. {s['name']}</strong> ({s['code']})<br>
-                <span style='color:#555;font-size:13px;'>점수: {s['score']}점 | RSI: {s['rsi']:.1f} | 이격도: {s['disparity']:.1f}%</span>
+                <strong>{i}. {s['name']}</strong> ({s['code']}) {sig}<br>
+                <span style='color:#555;font-size:13px;'>점수: {s['score']}점 | RSI: {s['rsi']:.1f} | 이격도: {s['disparity']:.1f}% | ROE: {safe_format(s.get('roe'), '.1f')}%</span>
             </div>"""
         
         return f"""
@@ -944,9 +1038,9 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     investor_type_section = f"""
     <h2 style='color:#2c3e50;margin:40px 0 20px;'>👥 투자자 유형별 추천</h2>
     <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:20px;margin-bottom:30px;'>
-        {make_investor_card('공격적 투자자', '고수익 추구, 높은 변동성 감내 가능', aggressive_stocks, '🚀', '#e74c3c')}
-        {make_investor_card('균형잡힌 투자자', '안정성과 수익성의 조화', balanced_stocks, '⚖️', '#3498db')}
-        {make_investor_card('보수적 투자자', '안정성 우선, 리스크 최소화', conservative_stocks, '🛡️', '#27ae60')}
+        {make_investor_card('공격적 투자자', '🟢이격도 90↓ + RSI 30↓ + 거래량 확인 → 반등 시작 포착', aggressive_stocks, '🚀', '#e74c3c')}
+        {make_investor_card('균형잡힌 투자자', '위험 보통 이하 + 시총 3,000억↑ → 유동성 확보', balanced_stocks, '⚖️', '#3498db')}
+        {make_investor_card('보수적 투자자', '위험 안정 + PBR 1.0↓ + ROE 5%↑ → 진짜 저평가 우량주', conservative_stocks, '🛡️', '#27ae60')}
     </div>
     """
     
@@ -1073,12 +1167,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
     <meta http-equiv='Pragma' content='no-cache'>
     <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v5.0 - {timestamp}</title>
+    <title>스윙 트레이딩 v5.1 - {timestamp}</title>
     <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v5.0</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v5.1</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
         <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_display}</div><div style='color:{kospi_change_color};'>{kospi_change_text}</div></div>
@@ -1093,14 +1187,14 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
         {top6_cards}
     </div>
     <table>
-        <thead><tr><th>순위</th><th>종목명</th><th>코드</th><th>현재가</th><th>점수</th><th>위험도</th><th>RSI</th><th>이격도</th><th>거래량</th><th>PBR</th></tr></thead>
+        <thead><tr><th>순위</th><th>종목명</th><th>코드</th><th>현재가</th><th>점수</th><th>위험도</th><th>진입신호</th><th>RSI</th><th>이격도</th><th>거래량</th><th>PBR</th></tr></thead>
         <tbody>{table_rows}</tbody>
     </table>
     {investor_type_section}
     {indicator_top5_section}
     {indicator_footer}
     <div style='text-align:center;margin-top:30px;padding:20px;color:#7f8c8d;font-size:13px;'>
-        <p>버전: v5.0 - 스윙 트레이딩 종목 추천 시스템 (입구 필터 강화: 동전주·부실주·저유동성 선제 차단)</p>
+        <p>버전: v5.1 - 스윙 트레이딩 종목 추천 시스템 (진입 신호 3단계: 🟢확인 🟡관찰 🔴대기)</p>
         <p>본 자료는 투자 참고용이며, 투자 책임은 본인에게 있습니다.</p>
     </div>
 </div>
@@ -1109,7 +1203,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     return html
 
 # ============================
-# 8. v5.0: 메인 함수 (입구 필터 강화 + 환율 조회 순서 변경)
+# 8. v5.1: 메인 함수
 # ============================
 def main():
     """
@@ -1117,11 +1211,12 @@ def main():
     v4.2.17: HTML 섹션 복구 (투자자 유형별 + 지표별 TOP5)
     v4.2.18: 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
     v5.0: 입구 필터 강화 (동전주·부실주·저유동성 선제 차단)
+    v5.1: 스윙 진입 신호 고도화 (ROE 적자 차단 + 거래량 추세 + 진입신호 3단계)
     """
     kst = pytz.timezone('Asia/Seoul')
     start_time = datetime.now(kst)
     
-    logging.info("=== 스윙 트레이딩 분석 시작 (v5.0) ===")
+    logging.info("=== 스윙 트레이딩 분석 시작 (v5.1) ===")
     
     # v4.2.16: 1단계 - 제일 먼저 환율 조회!
     cache = CacheManager()
@@ -1162,7 +1257,7 @@ def main():
     
     top_stocks = valid_results[:30]
     
-    logging.info(f"v5.0 분석 완료: {len(valid_results)}개 종목 추출 (입구필터 후)")
+    logging.info(f"v5.1 분석 완료: {len(valid_results)}개 종목 추출 (입구필터 후)")
     
     # 7단계 - Gemini AI 분석
     ai_analysis = get_gemini_analysis(top_stocks)
