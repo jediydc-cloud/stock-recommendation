@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-스윙 트레이딩 종목 추천 시스템 v4.2.18
+스윙 트레이딩 종목 추천 시스템 v5.0
 - v4.2.11: DART corp_code 매핑 개선 + 위험도 평가 시스템 추가 + 보수적 투자자 로직 보정
 - v4.2.12: 🔧 CRITICAL FIX - DARTCorpCodeMapper를 main()에서 한 번만 초기화하여 멀티프로세싱 에러 해결
 - v4.2.13: 🕐 TIMEZONE FIX - 한국 시간(KST, UTC+9) 표시 수정
@@ -10,6 +10,11 @@
 - v4.2.16: 🚀 EXCHANGE RATE PRIORITY - 환율 조회를 맨 앞으로 이동하여 rate limit 전에 확보
 - v4.2.17: 📊 HTML SECTIONS RESTORE - 투자자 유형별 추천 + 지표별 TOP5 섹션 복구
 - v4.2.18: 🎯 INVESTOR TYPE FIX - 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
+- v5.0:   🛡️ UNIVERSE PRE-FILTER - 입구 필터 강화 (동전주·부실주·저유동성 선제 차단)
+           ✅ 주가 ≥ 2,000원, 거래대금 ≥ 3억원, 시가총액 ≥ 300억원, 상장 ≥ 1년
+           ✅ 자본잠식·완전적자·거래량=0 종목 early return 추가
+           ✅ 급락/급등 구분 개선 (risk_score 정밀화)
+           ✅ 기존 점수계산·함수명·멀티프로세싱·환경변수·HTML 8섹션 전부 유지
 """
 
 import yfinance as yf
@@ -432,23 +437,52 @@ def load_stock_list():
         all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
         all_stocks['종목코드'] = all_stocks['종목코드'].astype(str).str.zfill(6)
         
+        # v5.0: 상장일 컬럼 확인 (상장 기간 필터용)
+        listing_date_col = None
+        for col in all_stocks.columns:
+            if '상장' in col and '일' in col:
+                listing_date_col = col
+                break
+
         filtered = []
         for _, row in all_stocks.iterrows():
             name, code = row['회사명'], row['종목코드']
-            if any(k in name for k in ['우', 'ETN', 'SPAC', '스팩', '리츠', '인프라']):
+
+            # v4.2.18 유지: ETF/SPAC/리츠 등 제외 키워드
+            # v5.0 추가: 관리종목·거래정지 관련 키워드 강화
+            exclude_keywords = [
+                '우', 'ETN', 'SPAC', '스팩', '리츠', '인프라',  # 기존
+                '관리', '(M)', '(관)', '정지', '제8호', '제9호', '제10호',  # v5.0 추가
+                '기업인수목적', '기업재무안정'  # v5.0: 스팩 변형 추가
+            ]
+            if any(k in name for k in exclude_keywords):
                 continue
             if not code.isdigit():
                 continue
+
+            # v5.0: 상장 기간 필터 (1년 미만 제외)
+            if listing_date_col and pd.notna(row.get(listing_date_col)):
+                try:
+                    listing_date = pd.to_datetime(str(row[listing_date_col]), errors='coerce')
+                    if pd.notna(listing_date):
+                        listing_years = (datetime.now() - listing_date.to_pydatetime()).days / 365.0
+                        if listing_years < 1.0:
+                            continue
+                except:
+                    pass
+
             filtered.append([name, code])
         
-        logging.info(f"필터링: {len(all_stocks)} → {len(filtered)}개")
+        logging.info(f"v5.0 필터링: {len(all_stocks)} → {len(filtered)}개 (관리종목·신규상장 제외)")
         return filtered
     except Exception as e:
         logging.error(f"종목 리스트 로드 실패: {e}")
         return []
 
 def analyze_stock_worker(args):
-    """v4.2.12: corp_code_map을 인자로 받아서 사용 (다운로드 없음)"""
+    """v4.2.12: corp_code_map을 인자로 받아서 사용 (다운로드 없음)
+    v5.0: 입구 필터 추가 (주가/거래대금/시가총액/자본잠식/완전적자/거래량=0 early return)
+    """
     import signal
     
     def timeout_handler(signum, frame):
@@ -466,15 +500,34 @@ def analyze_stock_worker(args):
         
         if df.empty or len(df) < 20:
             return None
-        
+
+        current_price = df['Close'].iloc[-1]
+        volume_avg = df['Volume'].iloc[-20:-1].mean()
+        current_volume = df['Volume'].iloc[-1]
+
+        # =====================================================
+        # v5.0 입구 필터 1: 거래량 = 0 (거래정지 종목 선제 차단)
+        # =====================================================
+        if current_volume == 0:
+            return None
+
+        # =====================================================
+        # v5.0 입구 필터 2: 주가 ≥ 2,000원 (동전주 선제 차단)
+        # =====================================================
+        if current_price < 2000:
+            return None
+
+        # =====================================================
+        # v5.0 입구 필터 3: 20일 평균 거래대금 ≥ 3억원 (저유동성 선제 차단)
+        # =====================================================
+        avg_trading_value = volume_avg * current_price
+        if avg_trading_value < 300_000_000:  # 3억원
+            return None
+
         chart_data = [
             {'date': d.strftime('%Y-%m-%d'), 'close': float(r['Close'])} 
             for d, r in df.iterrows()
         ]
-        
-        current_price = df['Close'].iloc[-1]
-        volume_avg = df['Volume'].iloc[-20:-1].mean()
-        current_volume = df['Volume'].iloc[-1]
         
         # RSI
         delta = df['Close'].diff()
@@ -537,6 +590,12 @@ def analyze_stock_worker(args):
         if equity and shares and shares > 0:
             bps_value = equity / shares
             pbr_value = current_price / bps_value if bps_value > 0 else None
+
+            # =====================================================
+            # v5.0 입구 필터 4: 자본잠식 (자본총계 음수) 선제 차단
+            # =====================================================
+            if equity < 0:
+                return None
             
             if pbr_value:
                 pbr_score = 15 if pbr_value < 1.0 else 10 if pbr_value < 1.5 else 5 if pbr_value < 2.0 else 0
@@ -547,6 +606,12 @@ def analyze_stock_worker(args):
         
         if net_income and equity and equity > 0:
             roe_value = (net_income / equity) * 100
+
+            # =====================================================
+            # v5.0 입구 필터 5: 완전적자 (ROE < -15%) 선제 차단
+            # =====================================================
+            if roe_value < -15.0:
+                return None
         
         # 5일 수익률
         returns_5d = ((df['Close'].iloc[-1] - df['Close'].iloc[-6]) / df['Close'].iloc[-6] * 100) if len(df) >= 6 else 0
@@ -560,6 +625,15 @@ def analyze_stock_worker(args):
         total_score = rsi_score + disparity_score + volume_score + pbr_score + returns_score + rebound_score
         trading_value = current_price * current_volume
         
+        # =====================================================
+        # v5.0 입구 필터 6: 시가총액 >= 300억원 (소형주 선제 차단)
+        # shares가 있으면 시총 계산, 없으면 통과 (데이터 없음)
+        # =====================================================
+        if shares and shares > 0:
+            market_cap = current_price * shares
+            if market_cap < 30_000_000_000:  # 300억원
+                return None
+
         # v4.2.11: 위험도 평가 로직
         risk_score = 0
         
@@ -567,36 +641,36 @@ def analyze_stock_worker(args):
         # 1. 거래정지 체크 (종목명 또는 거래량)
         if '정지' in name or '거래중지' in name:
             risk_score += 100
-        elif current_volume == 0:
+        elif current_volume == 0:  # v5.0 early return에서 이미 차단되지만 폴백
             risk_score += 100
         
         # 2. 관리종목 체크
         if '관리' in name or '(M)' in name:
             risk_score += 80
         
-        # 3. 자본잠식 체크 (PBR 기반)
+        # 3. 자본잠식 체크 (PBR 기반) - v5.0 early return에서 equity<0는 이미 차단
         if pbr_value and pbr_value > 5.0:  # 자본총계가 시가총액 대비 매우 낮음
             risk_score += 80
-        elif equity and equity < 0:  # 자본총계가 음수
-            risk_score += 80
         
-        # 4. 적자 기업
+        # 4. 적자 기업 (v5.0: ROE<-15% early return 이후 나머지 적자 처리)
         if net_income and net_income < 0:
             risk_score += 50
         
         # [단기 가격 리스크]
-        # 5. 급등락 체크 (20일 고점/저점 대비)
         high_20d = df['High'].iloc[-20:].max()
-        low_20d = df['Low'].iloc[-20:].min()
-        volatility_range = ((high_20d - low_20d) / low_20d * 100) if low_20d > 0 else 0
+        low_20d_risk = df['Low'].iloc[-20:].min()
+        volatility_range = ((high_20d - low_20d_risk) / low_20d_risk * 100) if low_20d_risk > 0 else 0
         
-        if volatility_range > 50:  # 20일간 50% 이상 변동
+        # 5. 극단 변동성 (20일 간 범위 50% 이상): 가격 조작 위험
+        if volatility_range > 50:
             risk_score += 25
-        
-        # 6. 과도한 반등 (저점 대비 급등)
-        if rebound_strength > 30:  # 20일 저점 대비 30% 이상 상승
-            risk_score += 25
-        
+
+        # 6. 반등 강도에 따른 세분 구분 (v5.0 개선)
+        if rebound_strength > 50:   # 급등 후 추가 반등 → 타이밍 늦음
+            risk_score += 40
+        elif rebound_strength > 30: # 개선 반등 → 주의
+            risk_score += 20
+
         # 7. 거래량 급증 (평소의 5배 이상)
         if volume_ratio > 5.0:
             risk_score += 20
@@ -999,12 +1073,12 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
     <meta http-equiv='Pragma' content='no-cache'>
     <meta http-equiv='Expires' content='0'>
-    <title>스윙 트레이딩 v4.2.18 - {timestamp}</title>
+    <title>스윙 트레이딩 v5.0 - {timestamp}</title>
     <style>body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}.container{{max-width:1400px;margin:0 auto;background:#f8f9fa;padding:30px;border-radius:15px;box-shadow:0 10px 40px rgba(0,0,0,0.3);}}h1{{color:#2c3e50;text-align:center;margin-bottom:10px;font-size:32px;}}.timestamp{{text-align:center;color:#7f8c8d;margin-bottom:30px;font-size:14px;}}.market-overview{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px;}}.market-card{{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);text-align:center;}}.ai-analysis{{background:white;padding:25px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;border-left:5px solid #3498db;}}.top-stocks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;margin-bottom:30px;}}table{{width:100%;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}th{{background:#34495e;color:white;padding:15px;text-align:left;}}</style>
 </head>
 <body>
 <div class='container'>
-    <h1>📊 스윙 트레이딩 종목 추천 v4.2.18</h1>
+    <h1>📊 스윙 트레이딩 종목 추천 v5.0</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     <div class='market-overview'>
         <div class='market-card'><h3 style='margin:0;color:#e74c3c;'>KOSPI</h3><div style='font-size:24px;font-weight:bold;margin:10px 0;'>{kospi_display}</div><div style='color:{kospi_change_color};'>{kospi_change_text}</div></div>
@@ -1026,7 +1100,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     {indicator_top5_section}
     {indicator_footer}
     <div style='text-align:center;margin-top:30px;padding:20px;color:#7f8c8d;font-size:13px;'>
-        <p>버전: v4.2.18 - 스윙 트레이딩 종목 추천 시스템 (투자자 유형별 추천 로직 수정)</p>
+        <p>버전: v5.0 - 스윙 트레이딩 종목 추천 시스템 (입구 필터 강화: 동전주·부실주·저유동성 선제 차단)</p>
         <p>본 자료는 투자 참고용이며, 투자 책임은 본인에게 있습니다.</p>
     </div>
 </div>
@@ -1035,18 +1109,19 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp):
     return html
 
 # ============================
-# 8. v4.2.16: 메인 함수 (환율 조회 순서 변경)
+# 8. v5.0: 메인 함수 (입구 필터 강화 + 환율 조회 순서 변경)
 # ============================
 def main():
     """
     v4.2.16: 환율을 맨 먼저 조회하여 rate limit 전에 확보
     v4.2.17: HTML 섹션 복구 (투자자 유형별 + 지표별 TOP5)
     v4.2.18: 투자자 유형별 추천 로직 수정 (위험도 기반 필터링)
+    v5.0: 입구 필터 강화 (동전주·부실주·저유동성 선제 차단)
     """
     kst = pytz.timezone('Asia/Seoul')
     start_time = datetime.now(kst)
     
-    logging.info("=== 스윙 트레이딩 분석 시작 (v4.2.18) ===")
+    logging.info("=== 스윙 트레이딩 분석 시작 (v5.0) ===")
     
     # v4.2.16: 1단계 - 제일 먼저 환율 조회!
     cache = CacheManager()
@@ -1087,7 +1162,7 @@ def main():
     
     top_stocks = valid_results[:30]
     
-    logging.info(f"분석 완료: {len(valid_results)}개 종목 추출")
+    logging.info(f"v5.0 분석 완료: {len(valid_results)}개 종목 추출 (입구필터 후)")
     
     # 7단계 - Gemini AI 분석
     ai_analysis = get_gemini_analysis(top_stocks)
