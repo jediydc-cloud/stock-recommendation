@@ -1,5 +1,8 @@
-pykrx
+yfinance
 pandas
-numpy
-requests
 pytz
+requests
+google-generativeai
+pykrx          
+lxml           
+html5lib       
