@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-다이나믹 트레이딩 종목 추천 시스템 v1.2
+다이나믹 트레이딩 종목 추천 시스템 v1.2.1
 ─────────────────────────────────────────
 v1.0: 시장 국면 감지 · 모멘텀 · 섹터 로테이션
 v1.1: 재무 추세 분석(▲/→/▼) · Value Trap 탐지 · 점수 분해 표시
-v1.2: 상대강도(RS) 투자 원칙 통합
-  ✅ 버그 수정: fin_top5 lambda {{{{}}}} → format_fin_trend() 별도 함수로 분리
-  ✅ KOSPI 기준 데이터 수집 (1회) → 전 종목 공유 (pykrx + yfinance 이중 fallback)
-  ✅ 상대강도(RS) Score: 종목수익률 - KOSPI수익률 (20일·50일)
-  ✅ 하락 방어력(Defensive Strength): KOSPI 스트레스일 대비 종목 반응
-  ✅ 물타기 경고(Averaging Down Warning): RS 약세 + 재무 하락 시 강경고
-  ✅ 점수 공식 갱신:
-     (반등×w1 + 모멘텀×w2) + 재무추세 + RS점수 + 방어력 + 섹터보너스 - 트랩패널티
-  ✅ HTML: RS 배지·방어력 바·물타기 경고·상대강도 TOP5 섹션 추가
-  ✅ 유형별 추천: 물타기 경고 종목은 모든 추천에서 자동 제외
+v1.2: 상대강도(RS) · 하락 방어력 · 물타기 경고
+v1.2.1: pykrx 차단 환경 대응 패치
+  ✅ detect_market_regime: yfinance ^KS11 fallback 추가
+  ✅ get_market_data: yfinance ^KS11/^KQ11 fallback 추가
+  ✅ get_sector_momentum: 섹터 ETF (yfinance) fallback 추가
+  ✅ 물타기 경고 문구 친절하게 개선
 """
 
 import yfinance as yf
@@ -235,7 +231,6 @@ class KRXData:
 def get_financial_trend(ticker_obj) -> dict:
     """
     yfinance quarterly_financials → 매출·영업이익·순이익 3분기 추세
-    DART 추가 호출 없음 / 반환: 방향(▲/→/▼), 변화율, 점수, 부채비율
     """
     result = {
         'revenue_trend':'?', 'revenue_change':None, 'revenue_score':0,
@@ -294,10 +289,6 @@ def get_financial_trend(ticker_obj) -> dict:
 # [v1.1] Value Trap 탐지
 # ============================
 def detect_value_trap(pbr, roe, ft: dict) -> dict:
-    """
-    저밸류인데 실적 악화 → 함정주 탐지
-    ⛔ 위험: -20점 / ⚠️ 주의: -10점 / ✅ 기회: 0점 / ➖ 중립: 0점
-    """
     if not ft.get('data_available'):
         return {'level':'unknown','penalty':0,'label':'','reason':'재무 추세 데이터 없음'}
     fs    = ft.get('total_score', 0)
@@ -329,16 +320,9 @@ def detect_value_trap(pbr, roe, ft: dict) -> dict:
 
 
 # ============================
-# [v1.2 신규] KOSPI 기준 데이터
+# [v1.2] KOSPI 기준 데이터
 # ============================
 def get_kospi_reference_data() -> dict:
-    """
-    KOSPI 기준 데이터 1회 수집 → 전 종목 공유
-    - 20일·50일 누적 수익률
-    - 스트레스 구간 날짜 (일별 -1% 이하)
-    - 일별 수익률 딕셔너리
-    pykrx 우선 → yfinance fallback
-    """
     empty = {'data_available': False, 'return_20d': 0.0, 'return_50d': 0.0,
              'stress_dates': set(), 'daily_returns': {}}
     try:
@@ -361,7 +345,6 @@ def get_kospi_reference_data() -> dict:
     except Exception as e:
         logging.warning(f"pykrx KOSPI 실패: {e} → yfinance fallback")
 
-    # yfinance fallback
     try:
         df = yf.Ticker("^KS11").history(period='6mo')
         if len(df) >= 20:
@@ -382,35 +365,60 @@ def get_kospi_reference_data() -> dict:
 
 
 # ============================
-# [v1.0] 시장 국면 감지
+# [v1.2.1 패치] 시장 국면 감지 - yfinance fallback 추가
 # ============================
 def detect_market_regime() -> dict:
-    """KOSPI MA20/MA60 기반 시장 국면 자동 감지"""
+    """KOSPI MA20/MA60 기반 시장 국면 자동 감지 (pykrx → yfinance fallback)"""
+    df = None
+    source = ""
+
+    # 1차: pykrx 시도
     try:
         from pykrx import stock
         kst = pytz.timezone('Asia/Seoul'); today = datetime.now(kst)
-        df  = stock.get_index_ohlcv(
-            (today - timedelta(days=200)).strftime('%Y%m%d'), today.strftime('%Y%m%d'), "1001")
-        if len(df) < 60:
-            raise ValueError("데이터 부족")
-        df['MA20'] = df['종가'].rolling(20).mean()
-        df['MA60'] = df['종가'].rolling(60).mean()
-        last  = df.iloc[-1]
-        price = float(last['종가']); ma20 = float(last['MA20']); ma60 = float(last['MA60'])
-        mom20 = (price - float(df['종가'].iloc[-20])) / float(df['종가'].iloc[-20]) * 100 if len(df) >= 20 else 0
-        if price > ma20 > ma60:
-            r, e, c = '상승장','🚀','#27ae60'; hint = '모멘텀 전략 강화 · 신고가 근접 종목 중심'
-        elif price < ma20 < ma60:
-            r, e, c = '하락장','⚠️','#e74c3c'; hint = '반등 전략 강화 · 저평가 종목 중심 (비중 축소 권장)'
-        else:
-            r, e, c = '횡보장','⚖️','#e67e22'; hint = '반등 + 모멘텀 균형 병행 전략'
-        logging.info(f"📊 시장 국면: {r} | KOSPI {price:,.0f} / MA20 {ma20:,.0f} / MA60 {ma60:,.0f}")
-        return {'regime':r,'emoji':e,'color':c,'strategy_hint':hint,
-                'price':price,'ma20':ma20,'ma60':ma60,'momentum_20d':mom20}
+        raw = stock.get_index_ohlcv(
+            (today - timedelta(days=200)).strftime('%Y%m%d'),
+            today.strftime('%Y%m%d'), "1001")
+        if raw is not None and len(raw) >= 60:
+            df = raw.rename(columns={'종가': 'Close'})
+            source = "pykrx"
     except Exception as e:
-        logging.warning(f"시장 국면 감지 실패: {e}")
-        return {'regime':'횡보장','emoji':'⚖️','color':'#e67e22',
-                'strategy_hint':'횡보장 (조회 실패)','momentum_20d':0}
+        logging.warning(f"pykrx 시장 국면 실패: {e} → yfinance fallback 시도")
+
+    # 2차: yfinance ^KS11 fallback
+    if df is None or len(df) < 60:
+        try:
+            yf_df = yf.Ticker("^KS11").history(period='1y')
+            if yf_df is not None and len(yf_df) >= 60:
+                df = yf_df
+                source = "yfinance"
+        except Exception as e:
+            logging.warning(f"yfinance KOSPI fallback 실패: {e}")
+
+    if df is None or len(df) < 60:
+        logging.warning("⚠️ 시장 국면 데이터 부족 → 횡보장 기본값")
+        return {'regime': '횡보장', 'emoji': '⚖️', 'color': '#e67e22',
+                'strategy_hint': '데이터 수집 실패 - 균형 전략 권장', 'momentum_20d': 0}
+
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['MA60'] = df['Close'].rolling(60).mean()
+    last = df.iloc[-1]
+    price = float(last['Close']); ma20 = float(last['MA20']); ma60 = float(last['MA60'])
+    mom20 = (price - float(df['Close'].iloc[-20])) / float(df['Close'].iloc[-20]) * 100
+
+    if price > ma20 > ma60:
+        r, e, c = '상승장', '🚀', '#27ae60'
+        hint = '모멘텀 전략 강화 · 신고가 근접 종목 중심'
+    elif price < ma20 < ma60:
+        r, e, c = '하락장', '⚠️', '#e74c3c'
+        hint = '반등 전략 강화 · 저평가 종목 중심 (비중 축소 권장)'
+    else:
+        r, e, c = '횡보장', '⚖️', '#e67e22'
+        hint = '반등 + 모멘텀 균형 병행 전략'
+
+    logging.info(f"📊 시장 국면: {r} | KOSPI {price:,.0f} / MA20 {ma20:,.0f} / MA60 {ma60:,.0f} ({source})")
+    return {'regime': r, 'emoji': e, 'color': c, 'strategy_hint': hint,
+            'price': price, 'ma20': ma20, 'ma60': ma60, 'momentum_20d': mom20}
 
 
 # ============================
@@ -438,20 +446,40 @@ def get_sector_for_stock(name: str) -> str:
 
 
 # ============================
-# [v1.0] 섹터 모멘텀 분석
+# [v1.2.1 패치] 섹터 모멘텀 분석 - ETF fallback 추가
 # ============================
 def get_sector_momentum() -> dict:
+    """
+    1차: pykrx 섹터 인덱스 (KRX 직접 차단 시 실패 가능)
+    2차: yfinance 섹터 ETF로 대체 (안정적)
+    """
     SECTOR_INDEX = {
-        'IT/반도체':'1028','바이오/제약':'1021','금융/증권':'1032',
-        '에너지/화학':'1006','건설/부동산':'1016','철강/소재':'1007',
-        '조선/해운':'1010','통신':'1026','소비재/유통':'1020',
+        'IT/반도체': '1028', '바이오/제약': '1021', '금융/증권': '1032',
+        '에너지/화학': '1006', '건설/부동산': '1016', '철강/소재': '1007',
+        '조선/해운': '1010', '통신': '1026', '소비재/유통': '1020',
     }
+
+    # 섹터 ETF 매핑 (yfinance fallback용)
+    SECTOR_ETF = {
+        'IT/반도체':    '091160.KS',  # KODEX 반도체
+        '바이오/제약':  '244580.KS',  # KODEX 바이오
+        '금융/증권':    '091170.KS',  # KODEX 은행
+        '에너지/화학':  '117460.KS',  # KODEX 에너지화학
+        '건설/부동산':  '117700.KS',  # KODEX 건설
+        '철강/소재':    '117680.KS',  # KODEX 철강
+        '조선/해운':    '102960.KS',  # KODEX 기계장비
+        '통신':         '098560.KS',  # TIGER 방송통신
+        '소비재/유통':  '266370.KS',  # KODEX K-신소비
+    }
+
+    sr = {}
+
+    # 1차: pykrx
     try:
         from pykrx import stock
         kst = pytz.timezone('Asia/Seoul'); today = datetime.now(kst)
-        ed  = today.strftime('%Y%m%d')
-        sd  = (today - timedelta(days=35)).strftime('%Y%m%d')
-        sr  = {}
+        ed = today.strftime('%Y%m%d')
+        sd = (today - timedelta(days=35)).strftime('%Y%m%d')
         for sn, ic in SECTOR_INDEX.items():
             try:
                 df = stock.get_index_ohlcv(sd, ed, ic)
@@ -459,13 +487,28 @@ def get_sector_momentum() -> dict:
                     sr[sn] = round((df['종가'].iloc[-1] - df['종가'].iloc[0]) / df['종가'].iloc[0] * 100, 2)
                 time.sleep(0.2)
             except: continue
-        if sr:
-            srt = dict(sorted(sr.items(), key=lambda x: -x[1]))
-            top = list(srt.keys())[:3]
-            logging.info(f"📈 주도 섹터 Top3: {top}")
-            return {'returns': srt, 'top_sectors': top}
     except Exception as e:
-        logging.warning(f"섹터 모멘텀 실패: {e}")
+        logging.warning(f"pykrx 섹터 모멘텀 실패: {e}")
+
+    # 2차: yfinance ETF fallback (pykrx 실패 또는 부분 실패 시)
+    if len(sr) < 5:
+        logging.info("⏳ 섹터 ETF fallback 시도 (yfinance)...")
+        for sn, etf in SECTOR_ETF.items():
+            if sn in sr: continue
+            try:
+                df = yf.Ticker(etf).history(period='1mo')
+                if len(df) >= 2:
+                    sr[sn] = round((df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0] * 100, 2)
+                time.sleep(0.3)
+            except: continue
+
+    if sr:
+        srt = dict(sorted(sr.items(), key=lambda x: -x[1]))
+        top = list(srt.keys())[:3]
+        logging.info(f"📈 주도 섹터 Top3: {top} ({len(sr)}개 섹터 수집)")
+        return {'returns': srt, 'top_sectors': top}
+
+    logging.warning("⚠️ 섹터 모멘텀 수집 완전 실패")
     return {'returns': {}, 'top_sectors': []}
 
 
@@ -526,10 +569,6 @@ def load_stock_list():
 # 7. 종목 분석 워커 (v1.2)
 # ============================
 def analyze_stock_worker(args):
-    """
-    v1.2: RS Score + Defensive Strength + 물타기 경고 통합
-    점수 = (반등×w + 모멘텀×w) + 재무추세 + RS점수 + 방어력 + 섹터보너스 - 트랩패널티
-    """
     import signal
 
     def _timeout(signum, frame): raise TimeoutError()
@@ -669,16 +708,15 @@ def analyze_stock_worker(args):
         sector       = get_sector_for_stock(name)
         sector_bonus = 5 if sector in top_sectors else 0
 
-        # ── [v1.2 신규] 상대강도(RS) 계산 ───────────
+        # ── [v1.2] 상대강도(RS) 계산 ───────────
         rs_20d = rs_50d = 0.0
         rs_score = defensive_score = 0
         averaging_warning = False
 
         if kospi_ref.get('data_available'):
-            # 20일 RS
             s20 = ((price - df['Close'].iloc[-20]) / df['Close'].iloc[-20] * 100) if len(df) >= 20 else 0
             rs_20d = s20 - kospi_ref['return_20d']
-            # 50일 RS — 데이터 부족 시 0 처리 (s50=0이면 rs_50d=-KOSPI수익률로 오염되는 버그 수정)
+
             if len(df) >= 50:
                 s50    = (price - df['Close'].iloc[-50]) / df['Close'].iloc[-50] * 100
                 rs_50d = s50 - kospi_ref['return_50d']
@@ -686,14 +724,12 @@ def analyze_stock_worker(args):
                             -2  if rs_50d >= -5 else -5)
             else:
                 rs_50d    = 0.0
-                rs_50_pts = 0   # 데이터 부족 → 50일 RS 비활성화
+                rs_50_pts = 0
 
-            # RS 점수 (20일 주, 50일 보조)
             rs_20_pts = (15 if rs_20d >= 10 else 10 if rs_20d >= 5 else
                          5  if rs_20d >= 0  else -5 if rs_20d >= -5 else -10)
-            rs_score = rs_20_pts + rs_50_pts  # 범위: -15 ~ +20
+            rs_score = rs_20_pts + rs_50_pts
 
-            # ── [v1.2 신규] 하락 방어력 ───────────────
             stress_dates = kospi_ref.get('stress_dates', set())
             df_tmp = df.copy()
             df_tmp['ds']  = [d.strftime('%Y-%m-%d') for d in df_tmp.index]
@@ -710,7 +746,6 @@ def analyze_stock_worker(args):
                     defensive_score = (15 if diff >= 2.0 else 10 if diff >= 0 else
                                        5  if diff >= -1.0 else 0)
 
-            # ── [v1.2 신규] 물타기 경고 ──────────────
             if rs_20d < -5 and fin_score < 0:              averaging_warning = True
             elif rs_20d < -10:                             averaging_warning = True
             elif rs_20d < -5 and trap.get('level') == 'danger': averaging_warning = True
@@ -749,7 +784,7 @@ def analyze_stock_worker(args):
         if disparity > 120:      risk += 15
         if pbr and pbr > 3.0:    risk += 20
         if trap.get('level') == 'danger':    risk += 30
-        if averaging_warning:                risk += 15   # 물타기 경고 → 위험도 가중
+        if averaging_warning:                risk += 15
         risk_level = '고위험' if risk >= 70 else '보통' if risk >= 30 else '안정'
 
         return {
@@ -762,13 +797,10 @@ def analyze_stock_worker(args):
             'rebound_strength':rebound,
             'entry_signal':entry,
             'market_cap':mc,
-            # v1.0
             'momentum_score':mom_score, 'proximity_to_high':prox_hi,
             'return_1m':ret1m, 'sector':sector, 'sector_bonus':sector_bonus,
-            # v1.1
             'financial_trend':ft, 'fin_trend_score':fin_score,
             'trap_info':trap, 'trap_penalty':trap_penalty,
-            # v1.2
             'rs_20d':rs_20d, 'rs_50d':rs_50d,
             'rs_score':rs_score, 'defensive_score':defensive_score,
             'averaging_warning':averaging_warning,
@@ -783,29 +815,54 @@ def analyze_stock_worker(args):
 
 
 # ============================
-# 8. 시장 데이터 조회
+# [v1.2.1 패치] 시장 데이터 조회 - yfinance fallback 추가
 # ============================
 def get_market_data(exchange_rates: Dict[str, Optional[float]]) -> dict:
-    result = {'kospi':None,'kospi_change':0,'kosdaq':None,'kosdaq_change':0,
-              'usd':exchange_rates.get('usd'),'eur':exchange_rates.get('eur'),'jpy':exchange_rates.get('jpy')}
+    result = {'kospi': None, 'kospi_change': 0, 'kosdaq': None, 'kosdaq_change': 0,
+              'usd': exchange_rates.get('usd'), 'eur': exchange_rates.get('eur'),
+              'jpy': exchange_rates.get('jpy')}
+
+    # 1차: pykrx
     try:
         from pykrx import stock
         kst = pytz.timezone('Asia/Seoul'); today = datetime.now(kst)
-        for idx_code, key in [("1001","kospi"),("2001","kosdaq")]:
+        for idx_code, key in [("1001", "kospi"), ("2001", "kosdaq")]:
             for d in range(7):
                 try:
                     ed = (today - timedelta(days=d)).strftime('%Y%m%d')
-                    sd = (today - timedelta(days=d+5)).strftime('%Y%m%d')
+                    sd = (today - timedelta(days=d + 5)).strftime('%Y%m%d')
                     df = stock.get_index_ohlcv(sd, ed, idx_code)
                     if len(df) >= 2:
-                        result[key]          = df['종가'].iloc[-1]
+                        result[key] = df['종가'].iloc[-1]
                         result[f'{key}_change'] = (df['종가'].iloc[-1] - df['종가'].iloc[-2]) / df['종가'].iloc[-2] * 100
                         break
                     elif len(df) == 1:
                         result[key] = df['종가'].iloc[-1]; break
                 except: continue
     except Exception as e:
-        logging.warning(f"pykrx 실패: {e}")
+        logging.warning(f"pykrx 시장 데이터 실패: {e} → yfinance fallback")
+
+    # 2차: yfinance fallback
+    if not result['kospi']:
+        try:
+            df = yf.Ticker("^KS11").history(period='5d')
+            if len(df) >= 2:
+                result['kospi'] = float(df['Close'].iloc[-1])
+                result['kospi_change'] = (df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100
+                logging.info(f"✅ KOSPI yfinance fallback: {result['kospi']:,.2f}")
+        except Exception as e:
+            logging.warning(f"yfinance KOSPI 실패: {e}")
+
+    if not result['kosdaq']:
+        try:
+            df = yf.Ticker("^KQ11").history(period='5d')
+            if len(df) >= 2:
+                result['kosdaq'] = float(df['Close'].iloc[-1])
+                result['kosdaq_change'] = (df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100
+                logging.info(f"✅ KOSDAQ yfinance fallback: {result['kosdaq']:,.2f}")
+        except Exception as e:
+            logging.warning(f"yfinance KOSDAQ 실패: {e}")
+
     return result
 
 
@@ -849,14 +906,12 @@ def safe_format(v, fmt, default='N/A'):
     except: return default
 
 def format_fin_trend(s):
-    """fin_top5 make_list용 — f-string 밖 별도 함수 (v1.2 버그 수정)"""
     ft = s.get('financial_trend') or {}
     return (f"재무{s.get('fin_trend_score',0):+d}점 | "
             f"매출{ft.get('revenue_trend','?')} "
             f"영익{ft.get('op_trend','?')}")
 
 def format_rs(s):
-    """rs_top5 make_list용"""
     return (f"RS20d: {s.get('rs_20d',0):+.1f}%p | "
             f"방어력: {s.get('defensive_score',0)}점")
 
@@ -867,7 +922,6 @@ def format_rs(s):
 def generate_html(top_stocks, market_data, ai_analysis, timestamp,
                   regime_info=None, sector_data=None):
 
-    # ── 공통 배지 헬퍼 ────────────────────────────────
     def risk_badge(rl):
         c = {'안정':'#27ae60','보통':'#7f8c8d','고위험':'#e74c3c'}.get(rl,'#7f8c8d')
         return f"<span style='display:inline-block;padding:3px 8px;margin-left:6px;border-radius:4px;font-size:12px;font-weight:bold;background:{c};color:white;'>{rl}</span>"
@@ -884,7 +938,6 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
         return f"<span style='background:{c};color:white;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:bold;margin-left:4px;'>{lb}</span>"
 
     def rs_badge(rs_20d):
-        """상대강도 배지 — 색상 + 수치"""
         if rs_20d >= 5:   c, lb = '#27ae60', f'RS {rs_20d:+.1f}%p 🔝'
         elif rs_20d >= 0: c, lb = '#58d68d', f'RS {rs_20d:+.1f}%p'
         elif rs_20d >= -5:c, lb = '#e67e22', f'RS {rs_20d:+.1f}%p'
@@ -892,7 +945,6 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
         return f"<span style='background:{c};color:white;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:bold;'>{lb}</span>"
 
     def def_bar(score):
-        """방어력 바"""
         w = min(score / 15 * 100, 100)
         c = '#27ae60' if score >= 10 else '#e67e22' if score >= 5 else '#bdc3c7'
         return (f"<div style='display:flex;align-items:center;gap:6px;'>"
@@ -960,7 +1012,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
         </div>
     </div>"""
 
-    # ── [v1.2 신규] 상대강도 분석 섹션 ──────────────
+    # ── 상대강도 분석 섹션 ──────────────
     rs_sorted = sorted(top_stocks, key=lambda x: -x.get('rs_20d', 0))
     rs_top5   = rs_sorted[:5]
     rs_bot5   = sorted(top_stocks, key=lambda x: x.get('rs_20d', 0))[:5]
@@ -977,12 +1029,17 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
                 f"<td style='padding:8px 12px;border-bottom:1px solid #ecf0f1;text-align:center;'>{s.get('sector','기타')}</td>"
                 f"</tr>")
 
+    # ── [v1.2.1] 물타기 경고 문구 친절하게 개선 ──
     warn_html = ""
     if warn_list:
         items = "".join(
             f"<li><strong>{s['name']}</strong> ({s['code']}) — RS {s.get('rs_20d',0):+.1f}%p | "
-            f"재무: {s.get('fin_trend_score',0):+d}점 — "
-            f"<em>시장보다 약하고 실적도 하락 중 → 평균단가 낮추기는 약한 종목 비중을 늘리는 결과입니다</em></li>"
+            f"재무: {s.get('fin_trend_score',0):+d}점<br>"
+            f"<span style='color:#922b21;font-size:12px;'>"
+            f"📉 시장(KOSPI)보다 {abs(s.get('rs_20d',0)):.1f}%p 약하고, 매출·이익 추세도 하락 중. "
+            f"<strong>추가매수(물타기) 시 약한 종목 비중만 커져 손실 확대 위험이 큽니다.</strong> "
+            f"손절 검토 또는 재무 개선 신호 확인 후 재진입을 권장합니다."
+            f"</span></li>"
             for s in warn_list
         )
         warn_html = (f"<div style='margin-top:20px;padding:15px;background:#fadbd8;border-radius:8px;border-left:4px solid #e74c3c;'>"
@@ -1077,12 +1134,16 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
         ds    = s.get('defensive_score', 0)
         aw    = s.get('averaging_warning', False)
 
+        # ── [v1.2.1] 물타기 경고 박스 친절하게 개선 ──
         avg_warn_box = ""
         if aw:
             avg_warn_box = ("<div style='background:#fadbd8;border:1px solid #e74c3c;border-radius:6px;"
-                           "padding:8px 12px;margin-top:8px;font-size:12px;color:#922b21;'>"
-                           "⛔ <strong>물타기 경고</strong>: 이 종목은 현재 시장보다 약합니다. "
-                           "평균단가를 낮추는 행위는 약한 종목의 비중을 늘리는 결과가 될 수 있습니다.</div>")
+                           "padding:10px 12px;margin-top:8px;font-size:12px;color:#922b21;line-height:1.6;'>"
+                           "⛔ <strong>물타기 경고 (Averaging Down Warning)</strong><br>"
+                           "이 종목은 시장(KOSPI) 평균보다 수익률이 뒤처지고 있고, 재무 추세도 하락 중입니다. "
+                           "이런 상황에서 <strong>평균단가를 낮추려고 추가 매수(물타기)</strong>하면, "
+                           "약한 종목에 자금만 더 묶여 손실이 확대될 수 있습니다. "
+                           "<strong>손절 검토 또는 펀더멘털 개선 확인 후 재진입</strong>이 합리적입니다.</div>")
 
         top6_cards += f"""
         <div style='background:white;padding:18px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);{"border-top:3px solid #e74c3c;" if aw else ""}'>
@@ -1205,13 +1266,11 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
         )
 
     # ── 투자자 유형별 추천 ────────────────────────────
-    # v1.2: 물타기 경고 종목 전체 유형 추천 제외
     safe = [s for s in top_stocks[:30]
             if s.get('trap_info',{}).get('level') != 'danger'
             and not s.get('averaging_warning')]
 
     def fill_up(base_list, source, n=5):
-        """리스트가 n개 미만이면 source에서 보충"""
         result = list(base_list)
         for s in source:
             if len(result) >= n: break
@@ -1240,7 +1299,6 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
     con = fill_up(con, sorted([s for s in safe if s.get('risk_level') == '안정'
                                 and s.get('roe') is not None], key=lambda x: -x['score']))
 
-    # RS 강세 추천 (v1.2 신규)
     rs_strong = sorted([s for s in safe if s.get('rs_20d',0) >= 5 and s.get('defensive_score',0) >= 5],
                        key=lambda x: -(x.get('rs_20d',0) + x.get('defensive_score',0)))[:5]
     rs_strong = fill_up(rs_strong, sorted([s for s in safe if s.get('rs_20d',0) >= 0],
@@ -1304,10 +1362,9 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
     pbr_top5  = sorted([s for s in top_stocks if s.get('pbr')], key=lambda x: x['pbr'])[:5]
     mom_top5  = sorted([s for s in top_stocks if s.get('return_1m') is not None],
                        key=lambda x: -x.get('momentum_score',0))[:5]
-    # v1.1 버그 수정: format_fin_trend 별도 함수 사용
     fin_top5  = sorted([s for s in top_stocks if s.get('fin_trend_score',0) > 0],
                        key=lambda x: -x.get('fin_trend_score',0))[:5]
-    def_top5     = sorted(top_stocks, key=lambda x: -x.get('defensive_score',0))[:5]
+    def_top5  = sorted(top_stocks, key=lambda x: -x.get('defensive_score',0))[:5]
 
     indicator_section = f"""
     <h2 style='color:#2c3e50;margin:40px 0 20px;'>📈 지표별 TOP 5</h2>
@@ -1341,11 +1398,11 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
             <div><h4 style='color:#e67e22;'>📈 이격도</h4><p style='color:#555;line-height:1.6;margin:0;'>95% 이하: 저평가 / 105% 이상: 과열</p></div>
             <div><h4 style='color:#27ae60;'>📦 거래량</h4><p style='color:#555;line-height:1.6;margin:0;'>1.5배↑: 거래 활성화 / 0.7배↑+연속↑: 🟢 진입신호</p></div>
             <div><h4 style='color:#9b59b6;'>💰 PBR</h4><p style='color:#555;line-height:1.6;margin:0;'>1.0 이하: 저평가 / 3.0 이상: 고평가</p></div>
-            <div><h4 style='color:#1abc9c;'>📡 RS Score (신규)</h4><p style='color:#555;line-height:1.6;margin:0;'>종목수익률 - KOSPI수익률 (20일·50일) / 양수: 시장보다 강함</p></div>
-            <div><h4 style='color:#27ae60;'>🛡️ 하락 방어력 (신규)</h4><p style='color:#555;line-height:1.6;margin:0;'>KOSPI 스트레스일(-1%↓)에 종목이 얼마나 덜 빠졌는지</p></div>
+            <div><h4 style='color:#1abc9c;'>📡 RS Score</h4><p style='color:#555;line-height:1.6;margin:0;'>종목수익률 - KOSPI수익률 (20일·50일) / 양수: 시장보다 강함</p></div>
+            <div><h4 style='color:#27ae60;'>🛡️ 하락 방어력</h4><p style='color:#555;line-height:1.6;margin:0;'>KOSPI 스트레스일(-1%↓)에 종목이 얼마나 덜 빠졌는지</p></div>
             <div><h4 style='color:#1abc9c;'>📋 재무 추세</h4><p style='color:#555;line-height:1.6;margin:0;'>▲: 전분기 대비 5%↑ / ▼: 5%↓ / →: 보합</p></div>
             <div><h4 style='color:#e74c3c;'>⛔ 밸류트랩</h4><p style='color:#555;line-height:1.6;margin:0;'>저PBR + 실적 동반 하락 → 함정주 자동 감점</p></div>
-            <div><h4 style='color:#e74c3c;'>⛔ 물타기 경고 (신규)</h4><p style='color:#555;line-height:1.6;margin:0;'>RS -5%p 이하 + 재무 하락 → 추가매수 강경고 + 추천 제외</p></div>
+            <div><h4 style='color:#e74c3c;'>⛔ 물타기 경고</h4><p style='color:#555;line-height:1.6;margin:0;'>RS -5%p 이하 + 재무 하락 → 추가매수 강경고 + 추천 제외</p></div>
             <div><h4 style='color:#f39c12;'>🔄 섹터보너스</h4><p style='color:#555;line-height:1.6;margin:0;'>주도 섹터 Top3 소속 종목 +5점</p></div>
         </div>
         <div style='margin-top:14px;padding:13px;background:#e8f5e9;border-radius:8px;border-left:4px solid #27ae60;'>
@@ -1373,7 +1430,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
 <head>
     <meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'>
     <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
-    <title>다이나믹 트레이딩 v1.2 — {timestamp}</title>
+    <title>다이나믹 트레이딩 v1.2.1 — {timestamp}</title>
     <style>
         body{{font-family:'Segoe UI',sans-serif;margin:0;padding:20px;
               background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;}}
@@ -1397,7 +1454,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
 </head>
 <body>
 <div class='container'>
-    <h1>📊 다이나믹 트레이딩 종목 추천 v1.2</h1>
+    <h1>📊 다이나믹 트레이딩 종목 추천 v1.2.1</h1>
     <div class='timestamp'>생성 시간: {timestamp}</div>
     {regime_banner}
     <div class='market-overview'>
@@ -1434,7 +1491,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
     {indicator_section}
     {footer}
     <div style='text-align:center;margin-top:24px;padding:16px;color:#7f8c8d;font-size:12px;'>
-        <p>다이나믹 트레이딩 v1.2 — 시장 국면 · 모멘텀 · 섹터 로테이션 · 재무 추세 · Value Trap · 상대강도 · 물타기 경고</p>
+        <p>다이나믹 트레이딩 v1.2.1 — 시장 국면 · 모멘텀 · 섹터 로테이션 · 재무 추세 · Value Trap · 상대강도 · 물타기 경고</p>
         <p>본 자료는 투자 참고용이며, 투자 책임은 본인에게 있습니다.</p>
     </div>
 </div>
@@ -1446,13 +1503,10 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
 # ============================
 # 11. 메인 함수
 # ============================
-kospi_ref_global = {}   # main()에서 설정, 모듈 전역 참조용
-
 def main():
-    global kospi_ref_global
     kst        = pytz.timezone('Asia/Seoul')
     start_time = datetime.now(kst)
-    logging.info("=== 다이나믹 트레이딩 분석 시작 (v1.2) ===")
+    logging.info("=== 다이나믹 트레이딩 분석 시작 (v1.2.1) ===")
 
     cache          = CacheManager()
     exchange_rates = get_exchange_rates_only(cache)
@@ -1476,8 +1530,7 @@ def main():
     logging.info(f"→ 주도 섹터: {top_sectors}")
 
     logging.info("📡 KOSPI 기준 데이터 수집 중 (RS Score용)...")
-    kospi_ref        = get_kospi_reference_data()
-    kospi_ref_global = kospi_ref
+    kospi_ref = get_kospi_reference_data()
 
     stock_list = load_stock_list()
     if not stock_list: logging.error("종목 리스트 로드 실패"); return
@@ -1492,9 +1545,8 @@ def main():
     valid = [r for r in results if r and r['score'] >= 40]
     valid.sort(key=lambda x: (-x['score'], -x['trading_value']))
     top_stocks = valid[:30]
-    logging.info(f"v1.2 완료: {len(valid)}개 추출")
+    logging.info(f"v1.2.1 완료: {len(valid)}개 추출")
 
-    # 통계 요약
     danger_n  = sum(1 for r in valid if r.get('trap_info',{}).get('level') == 'danger')
     oppty_n   = sum(1 for r in valid if r.get('trap_info',{}).get('level') == 'opportunity')
     warn_n    = sum(1 for r in valid if r.get('averaging_warning'))
