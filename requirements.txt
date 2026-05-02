@@ -1,8 +1,28 @@
-yfinance
-pandas
-pytz
-requests
-google-generativeai
-pykrx          
-lxml           
-html5lib       
+# 다이나믹 트레이딩 v1.2 의존성
+# 마지막 업데이트: 2026-05
+
+# 주가 데이터
+yfinance>=0.2.40
+
+# 데이터 처리
+pandas>=2.0.0
+lxml>=4.9.0       # pd.read_html, pykrx 필수 의존성
+
+# 국내 주식 데이터
+pykrx>=1.0.45
+
+# 시간대 처리
+pytz>=2023.3
+
+# HTTP 요청 (DART API, KRX)
+requests>=2.31.0
+
+# AI 분석 (Gemini)
+google-generativeai>=0.3.0
+
+# ────────────────────────────────────────
+# 아래 패키지는 v1.2에서 미사용 — 제거됨
+# matplotlib  → HTML 차트는 JavaScript Canvas로 처리
+# Pillow      → 이미지 처리 불필요
+# beautifulsoup4 → pd.read_html(lxml)로 대체
+# ────────────────────────────────────────
