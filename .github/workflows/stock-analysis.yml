@@ -1,4 +1,4 @@
-name: Stock Analysis Auto Run
+name: Dynamic Trading Auto Run
 
 # 스케줄: 매일 평일 오전 8시 KST (UTC 기준 전날 23시)
 on:
@@ -25,7 +25,6 @@ jobs:
           python-version: '3.11'
 
       # 3. 의존성 패키지 설치 (requirements.txt 단일 관리)
-      #    제거된 패키지: matplotlib, Pillow, beautifulsoup4 (v1.2 미사용)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -34,13 +33,13 @@ jobs:
       # 4. 한글 폰트 설치 생략
       #    v1.2는 HTML + JavaScript Canvas 차트 사용 → matplotlib 없음 → 폰트 불필요
 
-      # 5. Python 스크립트 실행
-      - name: Run stock analysis
+      # 5. Python 스크립트 실행 ← ⚠️ 핵심 수정: dynamic_trading.py
+      - name: Run dynamic trading analysis
         env:
           DART_API: ${{ secrets.DART_API }}
           swingTrading: ${{ secrets.swingTrading }}
         run: |
-          python stock_swing_trading.py
+          python dynamic_trading.py
 
       # 6. index.html 생성 및 이전 파일 정리
       - name: Clean old HTML files and create index
@@ -76,5 +75,5 @@ jobs:
           git add *.html
           git add -u  # 삭제된 파일도 스테이징
           git diff --quiet && git diff --staged --quiet || \
-            git commit -m "Auto update: Stock analysis $(date +'%Y-%m-%d %H:%M:%S')"
+            git commit -m "Auto update: Dynamic Trading $(date +'%Y-%m-%d %H:%M:%S')"
           git push
