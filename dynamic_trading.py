@@ -678,15 +678,19 @@ def analyze_stock_worker(args):
             # 20일 RS
             s20 = ((price - df['Close'].iloc[-20]) / df['Close'].iloc[-20] * 100) if len(df) >= 20 else 0
             rs_20d = s20 - kospi_ref['return_20d']
-            # 50일 RS
-            s50 = ((price - df['Close'].iloc[-50]) / df['Close'].iloc[-50] * 100) if len(df) >= 50 else 0
-            rs_50d = s50 - kospi_ref['return_50d']
+            # 50일 RS — 데이터 부족 시 0 처리 (s50=0이면 rs_50d=-KOSPI수익률로 오염되는 버그 수정)
+            if len(df) >= 50:
+                s50    = (price - df['Close'].iloc[-50]) / df['Close'].iloc[-50] * 100
+                rs_50d = s50 - kospi_ref['return_50d']
+                rs_50_pts = (5  if rs_50d >= 5  else 2  if rs_50d >= 0 else
+                            -2  if rs_50d >= -5 else -5)
+            else:
+                rs_50d    = 0.0
+                rs_50_pts = 0   # 데이터 부족 → 50일 RS 비활성화
 
             # RS 점수 (20일 주, 50일 보조)
             rs_20_pts = (15 if rs_20d >= 10 else 10 if rs_20d >= 5 else
                          5  if rs_20d >= 0  else -5 if rs_20d >= -5 else -10)
-            rs_50_pts = (5  if rs_50d >= 5  else 2  if rs_50d >= 0 else
-                        -2  if rs_50d >= -5 else -5)
             rs_score = rs_20_pts + rs_50_pts  # 범위: -15 ~ +20
 
             # ── [v1.2 신규] 하락 방어력 ───────────────
@@ -1303,9 +1307,6 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
     # v1.1 버그 수정: format_fin_trend 별도 함수 사용
     fin_top5  = sorted([s for s in top_stocks if s.get('fin_trend_score',0) > 0],
                        key=lambda x: -x.get('fin_trend_score',0))[:5]
-    # v1.2 신규
-    rs_top5_ind  = sorted([s for s in top_stocks if kospi_ref_global.get('data_available',False)],
-                          key=lambda x: -x.get('rs_20d',0))[:5] if 'kospi_ref_global' in dir() else rs_top5
     def_top5     = sorted(top_stocks, key=lambda x: -x.get('defensive_score',0))[:5]
 
     indicator_section = f"""
@@ -1445,7 +1446,7 @@ def generate_html(top_stocks, market_data, ai_analysis, timestamp,
 # ============================
 # 11. 메인 함수
 # ============================
-kospi_ref_global = {}   # generate_html에서 rs_top5_ind 참조용
+kospi_ref_global = {}   # main()에서 설정, 모듈 전역 참조용
 
 def main():
     global kospi_ref_global
